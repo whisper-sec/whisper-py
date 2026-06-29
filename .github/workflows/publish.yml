@@ -4,6 +4,7 @@ on:
     types: [published]
 permissions:
   contents: read
+  id-token: write   # OIDC — PyPI Trusted Publishing (no API token/secret)
 jobs:
   pypi:
     runs-on: ubuntu-latest
@@ -14,8 +15,7 @@ jobs:
           python-version: "3.x"
       - run: pip install build
       - run: python -m build
-      # Publishes when the PYPI_TOKEN secret is set (a PyPI API token). Runs only on a
-      # published GitHub release, so there is no spurious failure before the token exists.
+      # No password: pypa/gh-action-pypi-publish authenticates via OIDC against the
+      # Trusted Publisher you configure at pypi.org/manage/account/publishing
+      # (project: whisper-id, owner: whisper-sec, repo: whisper-py, workflow: publish.yml).
       - uses: pypa/gh-action-pypi-publish@release/v1
-        with:
-          password: ${{ secrets.PYPI_TOKEN }}
