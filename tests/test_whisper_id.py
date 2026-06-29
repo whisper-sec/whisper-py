@@ -108,14 +108,48 @@ def test_egress_no_port_raises(monkeypatch):
             pass
 
 
-def test_verify_truthy_on_zero_exit(monkeypatch):
-    _capture(monkeypatch, _proc(code=0))
-    assert verify("2a04:2a01:1::1") is True
+def _http(monkeypatch, status, body):
+    """Stub the keyless HTTP layer (verify/rdap/egress_ip are CLI-free now)."""
+    monkeypatch.setattr(whisper_id, "_http_get", lambda url, *, timeout: (status, body.encode() if isinstance(body, str) else body))
 
 
-def test_verify_false_on_nonzero(monkeypatch):
-    _capture(monkeypatch, _proc(code=3, stderr="not a whisper agent"))
-    assert verify("2001:db8::1") is False
+def test_verify_true_on_200_agent(monkeypatch):
+    _http(monkeypatch, 200, '{"is_whisper_agent":true,"fqdn":"x.agents.whisper.online","dane_ok":true}')
+    assert whisper_id.verify("2a04:2a01:1::1") is True
+
+
+def test_verify_false_on_404(monkeypatch):
+    _http(monkeypatch, 404, '{"is_whisper_agent":false}')
+    assert whisper_id.verify("2001:db8::1") is False
+
+
+def test_verify_false_when_200_but_not_agent(monkeypatch):
+    _http(monkeypatch, 200, '{"is_whisper_agent":false}')
+    assert whisper_id.verify("2001:db8::1") is False
+
+
+def test_verify_details_returns_verdict(monkeypatch):
+    _http(monkeypatch, 200, '{"is_whisper_agent":true,"operator":"tABC","dane_ok":true,"jws_ok":true}')
+    d = whisper_id.verify_details("2a04:2a01:1::1")
+    assert d and d["operator"] == "tABC" and d["dane_ok"] is True
+
+
+def test_rdap_returns_record_or_none(monkeypatch):
+    _http(monkeypatch, 200, '{"handle":"ag1","name":"scout","status":["active"]}')
+    assert whisper_id.rdap("2a04:2a01:1::1")["name"] == "scout"
+    _http(monkeypatch, 404, "not found")
+    assert whisper_id.rdap("2001:db8::1") is None
+
+
+def test_egress_ip(monkeypatch):
+    _http(monkeypatch, 200, '{"ip":"2a04:2a01:1::a"}')
+    assert whisper_id.egress_ip() == "2a04:2a01:1::a"
+
+
+def test_verify_requires_address():
+    import pytest as _pytest
+    with _pytest.raises(WhisperError):
+        whisper_id.verify("  ")
 
 
 def test_ip_returns_address(monkeypatch):

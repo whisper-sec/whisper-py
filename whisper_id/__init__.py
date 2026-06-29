@@ -23,6 +23,9 @@ import os
 import re
 import shutil
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Iterator, Optional
@@ -31,6 +34,9 @@ __all__ = [
     "register",
     "egress",
     "verify",
+    "verify_details",
+    "rdap",
+    "egress_ip",
     "ip",
     "Agent",
     "Egress",
@@ -38,13 +44,19 @@ __all__ = [
     "cli_path",
     "__version__",
 ]
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # The publicly-announced Whisper agent prefix (AS219419) — used to liberally recover a
 # /128 from any control-plane envelope shape (Postel: be liberal in what we accept).
 _ADDR_RE = re.compile(r"2a04:2a01:[0-9a-fA-F:]{2,}")
 _HOSTPORT_RE = re.compile(r"127\.0\.0\.1:(\d{2,5})")
 _PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
+
+# Keyless public endpoint base (the same surface the CLI uses, server-side). Overridable for
+# testing/self-host via $WHISPER_RDAP_URL. These calls carry NO key and need NO `whisper` CLI —
+# they work in any runtime that can make an HTTPS request (serverless, edge, browsers).
+def _rdap_base() -> str:
+    return (os.environ.get("WHISPER_RDAP_URL") or "https://rdap.whisper.online").rstrip("/")
 
 
 class WhisperError(RuntimeError):
@@ -202,15 +214,79 @@ def egress(
                 os.environ[key] = value
 
 
+def _http_get(url: str, *, timeout: int) -> tuple[int, bytes]:
+    """GET a keyless public endpoint; return (status, body). No CLI, no key, no auth header."""
+    req = urllib.request.Request(
+        url,
+        headers={"Accept": "application/rdap+json, application/json, */*", "User-Agent": f"whisper-id-py/{__version__}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (https only, our endpoint)
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:  # 404 = clean "not an agent", etc. — a real, decodable answer
+        return exc.code, exc.read()
+    except urllib.error.URLError as exc:
+        raise WhisperError(f"could not reach {url}: {exc.reason}") from exc
+
+
 def verify(address: str, *, timeout: int = 60) -> bool:
     """Return ``True`` iff ``address`` is a real Whisper agent.
 
-    Keyless: drives ``whisper verify`` (DANE + DNSSEC + reverse-DNS + JWS). Never raises
-    on a negative verdict — it returns ``False``.
+    **Keyless and CLI-free** — a single HTTPS GET to the public ``/verify-identity`` endpoint,
+    which runs the full server-side trust chain (DANE + DNSSEC + reverse-DNS + JWS). Works in
+    any runtime (serverless, edge, browser). 200 ⇒ agent; 404 ⇒ not. Never raises on a negative
+    verdict (returns ``False``); raises ``WhisperError`` only if the endpoint is unreachable.
+    """
+    return verify_details(address, timeout=timeout) is not None
+
+
+def verify_details(address: str, *, timeout: int = 60) -> Optional[dict]:
+    """Return the full verify verdict (``is_whisper_agent``, ``fqdn``, ``operator``, ``tenant``,
+    ``dane_ok``, ``jws_ok``, ``evidence``, …) for a real Whisper agent, else ``None``. Keyless, CLI-free.
     """
     if not address or not address.strip():
         raise WhisperError("verify() needs an address")
-    return _run(["verify", address], timeout=timeout, check=False).returncode == 0
+    url = f"{_rdap_base()}/verify-identity?ip={urllib.parse.quote(address.strip(), safe='')}"
+    status, body = _http_get(url, timeout=timeout)
+    if status != 200:
+        return None
+    try:
+        v = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    return v if v.get("is_whisper_agent") else None
+
+
+def rdap(address: str, *, timeout: int = 60) -> Optional[dict]:
+    """Return the public RDAP record for a Whisper ``/128`` (handle, name, status, entities, …),
+    or ``None`` if there is no record. Keyless, CLI-free.
+    """
+    if not address or not address.strip():
+        raise WhisperError("rdap() needs an address")
+    url = f"{_rdap_base()}/ip/{urllib.parse.quote(address.strip(), safe=':')}"  # path segment — keep literal colons
+    status, body = _http_get(url, timeout=timeout)
+    if status != 200:
+        return None
+    try:
+        return json.loads(body)
+    except json.JSONDecodeError:
+        return None
+
+
+def egress_ip(*, timeout: int = 60) -> str:
+    """Return the caller's current egress IP as seen by Whisper (what this process leaves from).
+
+    Keyless, CLI-free — useful inside a function/edge runtime to confirm which address you're
+    egressing from (a Whisper ``/128`` when routed through ``whisper connect``, else the
+    platform's own IP). Distinct from :func:`ip`, which uses the CLI to prove *your* ``/128``.
+    """
+    status, body = _http_get(f"{_rdap_base()}/egress-ip", timeout=timeout)
+    if status != 200:
+        raise WhisperError(f"egress-ip endpoint returned HTTP {status}")
+    try:
+        return json.loads(body).get("ip", "")
+    except json.JSONDecodeError:
+        return ""
 
 
 def ip(*, timeout: int = 60) -> str:
