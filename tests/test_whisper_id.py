@@ -3,6 +3,7 @@
 """Unit tests for whisper-id — the CLI is mocked, so these run anywhere (no live box)."""
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from types import SimpleNamespace
@@ -161,3 +162,201 @@ def test_run_check_raises_with_stderr(monkeypatch):
     _capture(monkeypatch, _proc(code=1, stderr="boom"))
     with pytest.raises(WhisperError, match="boom"):
         ip()
+
+
+# --- Control plane (pure-HTTP governance) ---------------------------------------------
+
+from whisper_id import agent, identity, list_agents, logs, policy, revoke  # noqa: E402
+
+
+def _post(monkeypatch, status, body):
+    """Stub the control-plane POST layer; capture the (url, payload, api_key) it was called with."""
+    seen = {}
+
+    def fake_post(url, payload, *, api_key, timeout):
+        seen["url"] = url
+        seen["payload"] = payload
+        seen["query"] = json.loads(payload)["query"]
+        seen["api_key"] = api_key
+        return status, body.encode() if isinstance(body, str) else body
+
+    monkeypatch.setattr(whisper_id, "_http_post", fake_post)
+    return seen
+
+
+@pytest.fixture(autouse=True)
+def _key_env(monkeypatch):
+    monkeypatch.setenv("WHISPER_API_KEY", "whisper_live_TESTKEY")
+
+
+# -- Cypher builder (conservative-emit: sorted keys, doubled quotes, injection-proof) --
+
+def test_build_query_sorts_keys_and_escapes_quotes():
+    q = whisper_id._build_agents_query("policy", {"default": "deny", "block": ["x.com", "y.com"], "allow": ["z.com"]})
+    assert q == "CALL whisper.agents({op:'policy', args:{allow:['z.com'],block:['x.com','y.com'],default:'deny'}})"
+
+
+def test_build_query_doubles_single_quote_no_breakout():
+    q = whisper_id._build_agents_query("identity", {"label": "Tim O'Reilly'}) RETURN 1 //"})
+    assert "Tim O''Reilly''}) RETURN 1 //" in q  # quotes doubled → trapped inside the literal
+    assert q.count("op:'identity'") == 1
+
+
+def test_build_query_empty_args():
+    assert whisper_id._build_agents_query("policy", {}) == "CALL whisper.agents({op:'policy', args:{}})"
+
+
+def test_cypher_lit_types():
+    assert whisper_id._cypher_lit(True) == "true"
+    assert whisper_id._cypher_lit(False) == "false"
+    assert whisper_id._cypher_lit(None) == "null"
+    assert whisper_id._cypher_lit(1000) == "1000"
+
+
+# -- Envelope decoder (liberal-accept: both wire shapes) -------------------------------
+
+def test_list_agents_flat_shape(monkeypatch):
+    seen = _post(monkeypatch, 200, json.dumps({
+        "ok": True, "status": 200,
+        "result": {"columns": ["kind", "item"],
+                   "rows": [["agents", {"label": "scout", "address": "2a04:2a01:1::9"}]]},
+        "error": None,
+    }))
+    fleet = list_agents()
+    assert fleet == [{"label": "scout", "address": "2a04:2a01:1::9"}]  # item unwrapped
+    assert seen["query"] == "CALL whisper.agents({op:'list', args:{kind:'agents'}})"
+    assert seen["api_key"] == "whisper_live_TESTKEY"
+
+
+def test_list_agents_live_row_shape(monkeypatch):
+    # Live procedure-row table: rows[0] carries the per-op envelope.
+    _post(monkeypatch, 200, json.dumps({
+        "columns": ["op", "ok", "status", "result", "error", "retry_after"],
+        "rows": [{"op": "list", "ok": True, "status": 200,
+                  "result": {"columns": ["kind", "item"], "rows": [["agents", {"label": "b1"}]]},
+                  "error": None, "retry_after": None}],
+    }))
+    assert list_agents() == [{"label": "b1"}]
+
+
+def test_list_agents_kind_passthrough(monkeypatch):
+    seen = _post(monkeypatch, 200, json.dumps({"ok": True, "result": {"columns": [], "rows": []}}))
+    list_agents("identities")
+    assert seen["query"] == "CALL whisper.agents({op:'list', args:{kind:'identities'}})"
+
+
+# -- policy: read (no args) vs set ------------------------------------------------------
+
+def test_policy_read_no_args(monkeypatch):
+    seen = _post(monkeypatch, 200, json.dumps({
+        "ok": True, "result": {"columns": ["key", "value"], "rows": [["default", "allow"]]}}))
+    assert policy() == {"default": "allow"}
+    assert seen["query"] == "CALL whisper.agents({op:'policy', args:{}})"  # no args ⇒ read
+
+
+def test_policy_set_sorts_args(monkeypatch):
+    seen = _post(monkeypatch, 200, json.dumps({
+        "ok": True, "result": {"columns": ["key", "value"], "rows": [["default", "deny"]]}}))
+    policy(default="deny", block=["x.com"], allow=["z.com"])
+    assert seen["query"] == "CALL whisper.agents({op:'policy', args:{allow:['z.com'],block:['x.com'],default:'deny'}})"
+
+
+# -- logs: from_ → wire `from`, kind narrow --------------------------------------------
+
+def test_logs_from_keyword_maps_to_wire_from(monkeypatch):
+    seen = _post(monkeypatch, 200, json.dumps({
+        "ok": True, "result": {"columns": ["ts", "kind"], "rows": [[1, "dns"]]}}))
+    out = logs(kind="dns", from_="-1h", limit=50)
+    assert out == [{"ts": 1, "kind": "dns"}]
+    assert seen["query"] == "CALL whisper.agents({op:'logs', args:{from:'-1h',kind:'dns',limit:50}})"
+
+
+def test_logs_empty_window(monkeypatch):
+    _post(monkeypatch, 200, json.dumps({"ok": True, "result": {"columns": ["ts"], "rows": []}}))
+    assert logs() == []
+
+
+# -- revoke / identity / agent ---------------------------------------------------------
+
+def test_revoke_sends_agent(monkeypatch):
+    seen = _post(monkeypatch, 200, json.dumps({
+        "ok": True, "result": {"columns": ["status"], "rows": [["revoked"]]}}))
+    assert revoke("ag_123") == {"status": "revoked"}
+    assert seen["query"] == "CALL whisper.agents({op:'revoke', args:{agent:'ag_123'}})"
+
+
+def test_revoke_requires_agent():
+    with pytest.raises(WhisperError, match="needs an agent"):
+        revoke("  ")
+
+
+def test_identity_allocate(monkeypatch):
+    seen = _post(monkeypatch, 200, json.dumps({
+        "ok": True, "result": {"columns": ["address", "fqdn"], "rows": [["2a04:2a01:1::a", "a.agents.whisper.online"]]}}))
+    rec = identity("my-label", contact_email="me@example.com")
+    assert rec["address"] == "2a04:2a01:1::a"
+    assert seen["query"] == (
+        "CALL whisper.agents({op:'identity', args:{contact_email:'me@example.com',label:'my-label'}})")
+
+
+def test_identity_release(monkeypatch):
+    seen = _post(monkeypatch, 200, json.dumps({"ok": True, "result": {"columns": ["state"], "rows": [["released"]]}}))
+    identity(release=True, address="2a04:2a01:1::a")
+    assert seen["query"] == "CALL whisper.agents({op:'identity', args:{address:'2a04:2a01:1::a',release:true}})"
+
+
+def test_identity_release_needs_address():
+    with pytest.raises(WhisperError, match="needs address"):
+        identity(release=True)
+
+
+def test_identity_allocate_needs_label():
+    with pytest.raises(WhisperError, match="non-empty label"):
+        identity()
+
+
+def test_agent_colon_is_address(monkeypatch):
+    seen = _post(monkeypatch, 200, json.dumps({"ok": True, "result": {"columns": ["address"], "rows": [["2a04:2a01:1::a"]]}}))
+    agent("2a04:2a01:1::a")
+    assert seen["query"] == "CALL whisper.agents({op:'agent', args:{address:'2a04:2a01:1::a'}})"
+
+
+def test_agent_id_selector(monkeypatch):
+    seen = _post(monkeypatch, 200, json.dumps({"ok": True, "result": {"columns": ["agent"], "rows": [["ag_9"]]}}))
+    agent("ag_9")
+    assert seen["query"] == "CALL whisper.agents({op:'agent', args:{agent:'ag_9'}})"
+
+
+# -- error handling: ok:false, bare problem, no key ------------------------------------
+
+def test_ok_false_raises_with_detail(monkeypatch):
+    _post(monkeypatch, 403, json.dumps({
+        "ok": False, "status": 403,
+        "error": {"type": "about:blank", "title": "forbidden", "status": 403, "detail": "scope admin:dns required"}}))
+    with pytest.raises(WhisperError, match="scope admin:dns required"):
+        policy(default="deny")
+
+
+def test_bare_problem_object_raises(monkeypatch):
+    _post(monkeypatch, 400, json.dumps({"type": "x", "title": "bad", "detail": "malformed address"}))
+    with pytest.raises(WhisperError, match="malformed address"):
+        agent("2a04:2a01:1::a")
+
+
+def test_no_key_raises(monkeypatch):
+    monkeypatch.delenv("WHISPER_API_KEY", raising=False)
+    with pytest.raises(WhisperError, match="no API key"):
+        list_agents(key=None)
+
+
+def test_explicit_key_arg_used(monkeypatch):
+    monkeypatch.delenv("WHISPER_API_KEY", raising=False)
+    seen = _post(monkeypatch, 200, json.dumps({"ok": True, "result": {"columns": [], "rows": []}}))
+    list_agents(key="whisper_live_ARG")
+    assert seen["api_key"] == "whisper_live_ARG"
+
+
+def test_non_json_reply_raises(monkeypatch):
+    _post(monkeypatch, 502, "<html>bad gateway</html>")
+    with pytest.raises(WhisperError, match="non-JSON"):
+        list_agents()

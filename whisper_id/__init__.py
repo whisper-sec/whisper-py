@@ -38,13 +38,20 @@ __all__ = [
     "rdap",
     "egress_ip",
     "ip",
+    # Control plane (pure-HTTP, no CLI) — the key unlocks these (Postel two-tier).
+    "list_agents",
+    "policy",
+    "logs",
+    "revoke",
+    "identity",
+    "agent",
     "Agent",
     "Egress",
     "WhisperError",
     "cli_path",
     "__version__",
 ]
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # The publicly-announced Whisper agent prefix (AS219419) — used to liberally recover a
 # /128 from any control-plane envelope shape (Postel: be liberal in what we accept).
@@ -57,6 +64,13 @@ _PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_pr
 # they work in any runtime that can make an HTTPS request (serverless, edge, browsers).
 def _rdap_base() -> str:
     return (os.environ.get("WHISPER_RDAP_URL") or "https://rdap.whisper.online").rstrip("/")
+
+
+# Control-plane endpoint — the ONE authenticated verb `whisper.agents({op,args})`. Pure
+# HTTPS (stdlib urllib, no `whisper` CLI); the key travels ONLY in the X-API-Key header.
+# Overridable via $WHISPER_CONTROL_URL for self-host/pre-prod (Postel: liberal in, sane default).
+def _control_url() -> str:
+    return (os.environ.get("WHISPER_CONTROL_URL") or "https://graph.whisper.security/api/query").strip()
 
 
 class WhisperError(RuntimeError):
@@ -293,3 +307,290 @@ def ip(*, timeout: int = 60) -> str:
     """Return the current egress IP, proving it is your Whisper /128 (drives ``whisper ip``)."""
     env = _run_json(["ip"], timeout=timeout)
     return _get(env, "ip", "agent") or _first_addr(env) or ""
+
+
+# ---------------------------------------------------------------------------------------
+# Control plane — pure-HTTP governance (no `whisper` CLI). The keyless calls above give
+# everyone real value with no key; supply your ``whisper_live_`` key (arg or
+# ``WHISPER_API_KEY``) and these unlock the full control plane (Postel two-tier). Every
+# call is one HTTPS POST of the single verb ``CALL whisper.agents({op, args})`` to
+# ``graph.whisper.security`` — stdlib ``urllib`` only, no extra dependencies.
+# ---------------------------------------------------------------------------------------
+
+def _escape_cypher(s: str) -> str:
+    """Render ``s`` safe inside a single-quoted Cypher literal: double every backslash then
+    every single quote (order matters), so a value can never break out of the map
+    (``Tim O'Reilly`` → ``Tim O''Reilly``). Conservative-emit: injection-proof by construction.
+    """
+    return s.replace("\\", "\\\\").replace("'", "''")
+
+
+def _cypher_lit(value) -> str:
+    """Render a Python value as a deterministic Cypher literal."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):  # bool BEFORE int — bool is an int subclass in Python
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return "'" + _escape_cypher(value) + "'"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        return repr(value)  # shortest round-tripping decimal
+    if isinstance(value, dict):
+        return _cypher_map(value)
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_cypher_lit(e) for e in value) + "]"
+    return "'" + _escape_cypher(str(value)) + "'"  # anything else → quoted string, never injects
+
+
+def _cypher_map(m: dict) -> str:
+    """Render a map literal with keys in SORTED order so the query is byte-stable."""
+    if not m:
+        return "{}"
+    return "{" + ",".join(f"{k}:{_cypher_lit(m[k])}" for k in sorted(m)) + "}"
+
+
+def _build_agents_query(op: str, args: Optional[dict] = None) -> str:
+    """Build the one control verb: ``CALL whisper.agents({op:'<op>', args:{…}})``."""
+    inner = _cypher_map(args) if args else "{}"
+    return f"CALL whisper.agents({{op:'{_escape_cypher(op)}', args:{inner}}})"
+
+
+def _http_post(url: str, payload: bytes, *, api_key: str, timeout: int) -> tuple[int, bytes]:
+    """POST a JSON control query; return ``(status, body)``.
+
+    The key travels ONLY in the ``X-API-Key`` header — never the body, never the URL, never
+    a log line. A 4xx/5xx still carries a decodable problem body, so we read it (rather than
+    raising) and let the caller surface the server's ``detail``.
+    """
+    req = urllib.request.Request(
+        url,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-API-Key": api_key,
+            "User-Agent": f"whisper-id-py/{__version__}",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (https, our endpoint)
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as exc:  # a problem object with a helpful `detail`
+        return exc.code, exc.read()
+    except urllib.error.URLError as exc:
+        raise WhisperError(f"could not reach the Whisper control plane: {exc.reason}") from exc
+
+
+def _decode_envelope(body: bytes, http_status: int):
+    """Normalise a reply into ``(ok, status, result, error)``. LIBERAL in what it accepts —
+    handles BOTH wire shapes the control plane may return:
+
+      * flat: ``{ok, status, result, error}``
+      * live: ``{columns, rows:[{op, ok, status, result, error}]}`` (procedure-row table)
+
+    plus a bare RFC-7807 problem object on a 4xx. ``result`` is a ``{columns, rows}`` map.
+    """
+    try:
+        data = json.loads(body or b"")
+    except (json.JSONDecodeError, ValueError):
+        return False, http_status, None, {"status": http_status, "detail": "control plane returned a non-JSON reply"}
+
+    if isinstance(data, dict):
+        # Flat shape: an explicit top-level ok flag.
+        if "ok" in data:
+            return bool(data.get("ok")), int(data.get("status") or http_status), data.get("result"), data.get("error")
+        # Live shape: a procedure-row table; rows[0] carries the per-op envelope.
+        rows = data.get("rows")
+        if isinstance(rows, list) and rows:
+            row0 = rows[0]
+            if isinstance(row0, list):  # positional row aligned to columns
+                row0 = dict(zip(data.get("columns") or [], row0))
+            if isinstance(row0, dict) and ("ok" in row0 or "result" in row0 or "error" in row0):
+                return (
+                    bool(row0.get("ok", True)),
+                    int(row0.get("status") or http_status),
+                    row0.get("result"),
+                    row0.get("error"),
+                )
+            return http_status < 400, http_status, data, None  # rows but no envelope → data is the table
+        # A bare problem object (detail/title/type) with no ok/rows.
+        if any(k in data for k in ("detail", "title", "type", "error")):
+            err = data.get("error") if isinstance(data.get("error"), dict) else data
+            return False, http_status, None, err
+
+    # Shapeless-but-valid (or empty) → success with an empty result (read ops fail open).
+    return http_status < 400, http_status, None, None
+
+
+def _records(result: Optional[dict]) -> list:
+    """Turn a ``{columns, rows}`` result into a list of column-keyed dicts (rows may already
+    be dicts — accept either, Postel-liberal)."""
+    if not isinstance(result, dict):
+        return []
+    cols = result.get("columns") or []
+    out = []
+    for row in result.get("rows") or []:
+        if isinstance(row, dict):
+            out.append(row)
+        elif isinstance(row, (list, tuple)):
+            out.append({cols[i]: row[i] for i in range(min(len(cols), len(row)))})
+    return out
+
+
+def _problem_detail(error: Optional[dict], status: int) -> str:
+    """The single most-helpful line from a problem object: detail → title → type → status."""
+    if isinstance(error, dict):
+        for key in ("detail", "title", "type"):
+            val = error.get(key)
+            if val:
+                return str(val)
+    return f"control plane returned status {status}" if status else "control plane reported failure"
+
+
+def _api_key(key: Optional[str]) -> str:
+    resolved = (key or os.environ.get("WHISPER_API_KEY") or "").strip()
+    if not resolved:
+        raise WhisperError(
+            "no API key — pass key='whisper_live_…' or set WHISPER_API_KEY. The control-plane "
+            "calls (list_agents/policy/logs/revoke/identity/agent) act on your own tenant and "
+            "need your key; the keyless calls (verify/rdap) do not."
+        )
+    return resolved
+
+
+def _control(op: str, args: Optional[dict] = None, *, key: Optional[str], timeout: int) -> list:
+    """POST ``CALL whisper.agents({op, args})`` and return the result as a list of records,
+    or raise :class:`WhisperError` carrying the server's ``detail`` on ``ok:false``."""
+    payload = json.dumps({"query": _build_agents_query(op, args)}).encode("utf-8")
+    status, body = _http_post(_control_url(), payload, api_key=_api_key(key), timeout=timeout)
+    ok, resolved_status, result, error = _decode_envelope(body, status)
+    if not ok:
+        raise WhisperError(_problem_detail(error, resolved_status))
+    return _records(result)
+
+
+def list_agents(kind: str = "agents", *, key: Optional[str] = None, timeout: int = 60) -> list:
+    """List your tenant's fleet (``op:list``). **Pure-HTTP, key required.**
+
+    ``kind`` = ``agents`` (default) | ``identities`` | ``records``. Returns a list of item
+    maps — each ``{label, fqdn, address, agent, created, state}`` (the outer ``{kind,item}``
+    wrapper is unwrapped for you).
+    """
+    recs = _control("list", {"kind": kind}, key=key, timeout=timeout)
+    return [rec.get("item", rec) if isinstance(rec, dict) else rec for rec in recs]
+
+
+def policy(
+    default: Optional[str] = None,
+    allow: Optional[list] = None,
+    block: Optional[list] = None,
+    *,
+    key: Optional[str] = None,
+    timeout: int = 60,
+) -> dict:
+    """Read or set your per-tenant DNS resolver policy (``op:policy``). **Pure-HTTP, key required.**
+
+    Call with **no arguments to READ** the current policy. To SET it, pass any of
+    ``default`` (``'allow'`` | ``'deny'``), ``allow`` (a list of names), ``block`` (a list of
+    names). Returns the resulting policy as a ``{key: value}`` dict either way.
+    """
+    args: dict = {}
+    if default is not None:
+        args["default"] = default
+    if allow is not None:
+        args["allow"] = list(allow)
+    if block is not None:
+        args["block"] = list(block)
+    recs = _control("policy", args, key=key, timeout=timeout)
+    return {rec.get("key"): rec.get("value") for rec in recs if isinstance(rec, dict) and rec.get("key") is not None}
+
+
+def logs(
+    agent: Optional[str] = None,
+    kind: Optional[str] = None,
+    *,
+    from_: Optional[object] = None,
+    to: Optional[object] = None,
+    limit: Optional[int] = None,
+    key: Optional[str] = None,
+    timeout: int = 60,
+) -> list:
+    """Recent activity from warm storage (``op:logs``). **Pure-HTTP, key required.**
+
+    Optional narrows: ``agent`` (id or ``/128``), ``kind`` = ``dns`` | ``conn`` | ``alloc``
+    (omit for all), ``from_``/``to`` (epoch-ms, RFC-3339, or relative like ``'-1h'`` — sent as
+    the wire ``from``/``to``), ``limit`` (default 1000, cap 10000). Returns a list of event
+    records (empty when the window has none).
+    """
+    args: dict = {}
+    if agent:
+        args["agent"] = agent
+    if kind:
+        args["kind"] = kind
+    if from_ is not None:
+        args["from"] = from_  # `from` is a Python keyword → accept `from_`, emit the wire `from`
+    if to is not None:
+        args["to"] = to
+    if limit is not None:
+        args["limit"] = limit
+    return _control("logs", args, key=key, timeout=timeout)
+
+
+def revoke(agent: str, *, key: Optional[str] = None, timeout: int = 60) -> dict:
+    """Fully revoke an agent (``op:revoke``) — **IRREVERSIBLE**. **Pure-HTTP, key required.**
+
+    ``agent`` is the agent id or its ``/128`` address. Returns the status record.
+    """
+    if not agent or not str(agent).strip():
+        raise WhisperError("revoke() needs an agent id or /128 address")
+    recs = _control("revoke", {"agent": str(agent).strip()}, key=key, timeout=timeout)
+    return recs[0] if recs else {}
+
+
+def identity(
+    label: Optional[str] = None,
+    contact_email: Optional[str] = None,
+    *,
+    release: bool = False,
+    address: Optional[str] = None,
+    key: Optional[str] = None,
+    timeout: int = 60,
+) -> dict:
+    """Allocate — or release — your own ``/128`` identity (``op:identity``). **Pure-HTTP, key required.**
+
+    Allocate: ``identity('my-label'[, contact_email='you@example.com'])`` → a record with
+    ``agent, address, fqdn, ptr, state``. Release (irreversible):
+    ``identity(release=True, address='<the /128>')``.
+    """
+    args: dict = {}
+    if release:
+        if not address or not str(address).strip():
+            raise WhisperError("identity(release=True) needs address='<the /128 to release>'")
+        args["release"] = True
+        args["address"] = str(address).strip()
+    else:
+        if not label or not str(label).strip():
+            raise WhisperError("identity() needs a non-empty label (or release=True with an address)")
+        args["label"] = str(label).strip()
+        if contact_email:
+            args["contact_email"] = contact_email
+    recs = _control("identity", args, key=key, timeout=timeout)
+    return recs[0] if recs else {}
+
+
+def agent(agent_or_address: str, *, key: Optional[str] = None, timeout: int = 60) -> dict:
+    """One agent's detail and counters (``op:agent``). **Pure-HTTP, key required.**
+
+    Accepts either selector (liberal): an agent id, or a ``/128`` address — a value
+    containing ``:`` is treated as an address. Returns the detail record (``address, fqdn,
+    ptr, label, state, dns_queries, bytes_up, …``).
+    """
+    selector = (agent_or_address or "").strip()
+    if not selector:
+        raise WhisperError("agent() needs an agent id or /128 address")
+    args = {"address": selector} if ":" in selector else {"agent": selector}
+    recs = _control("agent", args, key=key, timeout=timeout)
+    return recs[0] if recs else {}

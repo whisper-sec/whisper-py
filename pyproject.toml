@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "whisper-id"
-version = "0.2.0"
-description = "Give any Python agent a real, routable Whisper IPv6 identity and safe egress."
+version = "0.3.0"
+description = "Give any Python agent a real, routable Whisper IPv6 identity, safe egress, and full control plane."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
