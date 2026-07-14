@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 viaGraph B.V. (Whisper Security)
-"""whisper-id — a real, routable IPv6 identity and safe egress for any Python agent.
+"""whisper-id: a real, routable IPv6 identity and safe egress for any Python agent.
 
 A thin, dependency-free wrapper over the ``whisper`` CLI (https://whisper.online).
 The CLI holds the auth, the control plane, and the egress tunnel; this package gives
@@ -38,7 +38,7 @@ __all__ = [
     "rdap",
     "egress_ip",
     "ip",
-    # Control plane (pure-HTTP, no CLI) — the key unlocks these (Postel two-tier).
+    # Control plane (pure-HTTP, no CLI): the key unlocks these (Postel two-tier).
     "list_agents",
     "policy",
     "logs",
@@ -49,24 +49,27 @@ __all__ = [
     "Egress",
     "WhisperError",
     "cli_path",
+    # Keyed graph namespace (Cypher, so a key is required) - the security graph.
+    "Graph",
+    "graph",
     "__version__",
 ]
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
-# The publicly-announced Whisper agent prefix (AS219419) — used to liberally recover a
+# The publicly-announced Whisper agent prefix (AS219419), used to liberally recover a
 # /128 from any control-plane envelope shape (Postel: be liberal in what we accept).
 _ADDR_RE = re.compile(r"2a04:2a01:[0-9a-fA-F:]{2,}")
 _HOSTPORT_RE = re.compile(r"127\.0\.0\.1:(\d{2,5})")
 _PROXY_VARS = ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy")
 
 # Keyless public endpoint base (the same surface the CLI uses, server-side). Overridable for
-# testing/self-host via $WHISPER_RDAP_URL. These calls carry NO key and need NO `whisper` CLI —
+# testing/self-host via $WHISPER_RDAP_URL. These calls carry NO key and need NO `whisper` CLI;
 # they work in any runtime that can make an HTTPS request (serverless, edge, browsers).
 def _rdap_base() -> str:
     return (os.environ.get("WHISPER_RDAP_URL") or "https://rdap.whisper.online").rstrip("/")
 
 
-# Control-plane endpoint — the ONE authenticated verb `whisper.agents({op,args})`. Pure
+# Control-plane endpoint: the ONE authenticated verb `whisper.agents({op,args})`. Pure
 # HTTPS (stdlib urllib, no `whisper` CLI); the key travels ONLY in the X-API-Key header.
 # Overridable via $WHISPER_CONTROL_URL for self-host/pre-prod (Postel: liberal in, sane default).
 def _control_url() -> str:
@@ -79,7 +82,7 @@ class WhisperError(RuntimeError):
 
 @dataclass(frozen=True)
 class Agent:
-    """A Whisper agent — a routable IPv6 /128 that is both the identity and the auth."""
+    """A Whisper agent: a routable IPv6 /128 that is both the identity and the auth."""
 
     address: str
     id: Optional[str] = None
@@ -162,7 +165,7 @@ def _get(obj, *keys):
 
 
 def register(name: str, *, new_key: bool = False, timeout: int = 120) -> Agent:
-    """Create a named agent identity — a routable Whisper IPv6 /128.
+    """Create a named agent identity: a routable Whisper IPv6 /128.
 
     Drives ``whisper create --name <name>``. Pass ``new_key=True`` to mint a brand-new
     agent *with its own API key* (``op:register``). Requires ``WHISPER_API_KEY`` (or a
@@ -237,7 +240,7 @@ def _http_get(url: str, *, timeout: int) -> tuple[int, bytes]:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (https only, our endpoint)
             return resp.status, resp.read()
-    except urllib.error.HTTPError as exc:  # 404 = clean "not an agent", etc. — a real, decodable answer
+    except urllib.error.HTTPError as exc:  # 404 = clean "not an agent", etc.: still a real, decodable answer
         return exc.code, exc.read()
     except urllib.error.URLError as exc:
         raise WhisperError(f"could not reach {url}: {exc.reason}") from exc
@@ -246,7 +249,7 @@ def _http_get(url: str, *, timeout: int) -> tuple[int, bytes]:
 def verify(address: str, *, timeout: int = 60) -> bool:
     """Return ``True`` iff ``address`` is a real Whisper agent.
 
-    **Keyless and CLI-free** — a single HTTPS GET to the public ``/verify-identity`` endpoint,
+    **Keyless and CLI-free**: a single HTTPS GET to the public ``/verify-identity`` endpoint,
     which runs the full server-side trust chain (DANE + DNSSEC + reverse-DNS + JWS). Works in
     any runtime (serverless, edge, browser). 200 ⇒ agent; 404 ⇒ not. Never raises on a negative
     verdict (returns ``False``); raises ``WhisperError`` only if the endpoint is unreachable.
@@ -256,7 +259,7 @@ def verify(address: str, *, timeout: int = 60) -> bool:
 
 def verify_details(address: str, *, timeout: int = 60) -> Optional[dict]:
     """Return the full verify verdict (``is_whisper_agent``, ``fqdn``, ``operator``, ``tenant``,
-    ``dane_ok``, ``jws_ok``, ``evidence``, …) for a real Whisper agent, else ``None``. Keyless, CLI-free.
+    ``dane_ok``, ``jws_ok``, ``evidence``, ...) for a real Whisper agent, else ``None``. Keyless, CLI-free.
     """
     if not address or not address.strip():
         raise WhisperError("verify() needs an address")
@@ -272,12 +275,12 @@ def verify_details(address: str, *, timeout: int = 60) -> Optional[dict]:
 
 
 def rdap(address: str, *, timeout: int = 60) -> Optional[dict]:
-    """Return the public RDAP record for a Whisper ``/128`` (handle, name, status, entities, …),
+    """Return the public RDAP record for a Whisper ``/128`` (handle, name, status, entities, ...),
     or ``None`` if there is no record. Keyless, CLI-free.
     """
     if not address or not address.strip():
         raise WhisperError("rdap() needs an address")
-    url = f"{_rdap_base()}/ip/{urllib.parse.quote(address.strip(), safe=':')}"  # path segment — keep literal colons
+    url = f"{_rdap_base()}/ip/{urllib.parse.quote(address.strip(), safe=':')}"  # path segment: keep literal colons
     status, body = _http_get(url, timeout=timeout)
     if status != 200:
         return None
@@ -290,7 +293,7 @@ def rdap(address: str, *, timeout: int = 60) -> Optional[dict]:
 def egress_ip(*, timeout: int = 60) -> str:
     """Return the caller's current egress IP as seen by Whisper (what this process leaves from).
 
-    Keyless, CLI-free — useful inside a function/edge runtime to confirm which address you're
+    Keyless, CLI-free: useful inside a function/edge runtime to confirm which address you're
     egressing from (a Whisper ``/128`` when routed through ``whisper connect``, else the
     platform's own IP). Distinct from :func:`ip`, which uses the CLI to prove *your* ``/128``.
     """
@@ -310,11 +313,11 @@ def ip(*, timeout: int = 60) -> str:
 
 
 # ---------------------------------------------------------------------------------------
-# Control plane — pure-HTTP governance (no `whisper` CLI). The keyless calls above give
+# Control plane: pure-HTTP governance (no `whisper` CLI). The keyless calls above give
 # everyone real value with no key; supply your ``whisper_live_`` key (arg or
 # ``WHISPER_API_KEY``) and these unlock the full control plane (Postel two-tier). Every
 # call is one HTTPS POST of the single verb ``CALL whisper.agents({op, args})`` to
-# ``graph.whisper.security`` — stdlib ``urllib`` only, no extra dependencies.
+# ``graph.whisper.security``: stdlib ``urllib`` only, no extra dependencies.
 # ---------------------------------------------------------------------------------------
 
 def _escape_cypher(s: str) -> str:
@@ -329,7 +332,7 @@ def _cypher_lit(value) -> str:
     """Render a Python value as a deterministic Cypher literal."""
     if value is None:
         return "null"
-    if isinstance(value, bool):  # bool BEFORE int — bool is an int subclass in Python
+    if isinstance(value, bool):  # bool BEFORE int: bool is an int subclass in Python
         return "true" if value else "false"
     if isinstance(value, str):
         return "'" + _escape_cypher(value) + "'"
@@ -352,7 +355,7 @@ def _cypher_map(m: dict) -> str:
 
 
 def _build_agents_query(op: str, args: Optional[dict] = None) -> str:
-    """Build the one control verb: ``CALL whisper.agents({op:'<op>', args:{…}})``."""
+    """Build the one control verb: ``CALL whisper.agents({op:'<op>', args:{...}})``."""
     inner = _cypher_map(args) if args else "{}"
     return f"CALL whisper.agents({{op:'{_escape_cypher(op)}', args:{inner}}})"
 
@@ -360,7 +363,7 @@ def _build_agents_query(op: str, args: Optional[dict] = None) -> str:
 def _http_post(url: str, payload: bytes, *, api_key: str, timeout: int) -> tuple[int, bytes]:
     """POST a JSON control query; return ``(status, body)``.
 
-    The key travels ONLY in the ``X-API-Key`` header — never the body, never the URL, never
+    The key travels ONLY in the ``X-API-Key`` header: never the body, never the URL, never
     a log line. A 4xx/5xx still carries a decodable problem body, so we read it (rather than
     raising) and let the caller surface the server's ``detail``.
     """
@@ -385,7 +388,7 @@ def _http_post(url: str, payload: bytes, *, api_key: str, timeout: int) -> tuple
 
 
 def _decode_envelope(body: bytes, http_status: int):
-    """Normalise a reply into ``(ok, status, result, error)``. LIBERAL in what it accepts —
+    """Normalise a reply into ``(ok, status, result, error)``. LIBERAL in what it accepts:
     handles BOTH wire shapes the control plane may return:
 
       * flat: ``{ok, status, result, error}``
@@ -427,7 +430,7 @@ def _decode_envelope(body: bytes, http_status: int):
 
 def _records(result: Optional[dict]) -> list:
     """Turn a ``{columns, rows}`` result into a list of column-keyed dicts (rows may already
-    be dicts — accept either, Postel-liberal)."""
+    be dicts, accept either, Postel-liberal)."""
     if not isinstance(result, dict):
         return []
     cols = result.get("columns") or []
@@ -454,7 +457,7 @@ def _api_key(key: Optional[str]) -> str:
     resolved = (key or os.environ.get("WHISPER_API_KEY") or "").strip()
     if not resolved:
         raise WhisperError(
-            "no API key — pass key='whisper_live_…' or set WHISPER_API_KEY. The control-plane "
+            "no API key: pass key='whisper_live_...' or set WHISPER_API_KEY. The control-plane "
             "calls (list_agents/policy/logs/revoke/identity/agent) act on your own tenant and "
             "need your key; the keyless calls (verify/rdap) do not."
         )
@@ -476,7 +479,7 @@ def list_agents(kind: str = "agents", *, key: Optional[str] = None, timeout: int
     """List your tenant's fleet (``op:list``). **Pure-HTTP, key required.**
 
     ``kind`` = ``agents`` (default) | ``identities`` | ``records``. Returns a list of item
-    maps — each ``{label, fqdn, address, agent, created, state}`` (the outer ``{kind,item}``
+    maps: each ``{label, fqdn, address, agent, created, state}`` (the outer ``{kind,item}``
     wrapper is unwrapped for you).
     """
     recs = _control("list", {"kind": kind}, key=key, timeout=timeout)
@@ -521,7 +524,7 @@ def logs(
     """Recent activity from warm storage (``op:logs``). **Pure-HTTP, key required.**
 
     Optional narrows: ``agent`` (id or ``/128``), ``kind`` = ``dns`` | ``conn`` | ``alloc``
-    (omit for all), ``from_``/``to`` (epoch-ms, RFC-3339, or relative like ``'-1h'`` — sent as
+    (omit for all), ``from_``/``to`` (epoch-ms, RFC-3339, or relative like ``'-1h'``, sent as
     the wire ``from``/``to``), ``limit`` (default 1000, cap 10000). Returns a list of event
     records (empty when the window has none).
     """
@@ -540,7 +543,7 @@ def logs(
 
 
 def revoke(agent: str, *, key: Optional[str] = None, timeout: int = 60) -> dict:
-    """Fully revoke an agent (``op:revoke``) — **IRREVERSIBLE**. **Pure-HTTP, key required.**
+    """Fully revoke an agent (``op:revoke``): **IRREVERSIBLE**. **Pure-HTTP, key required.**
 
     ``agent`` is the agent id or its ``/128`` address. Returns the status record.
     """
@@ -559,7 +562,7 @@ def identity(
     key: Optional[str] = None,
     timeout: int = 60,
 ) -> dict:
-    """Allocate — or release — your own ``/128`` identity (``op:identity``). **Pure-HTTP, key required.**
+    """Allocate, or release, your own ``/128`` identity (``op:identity``). **Pure-HTTP, key required.**
 
     Allocate: ``identity('my-label'[, contact_email='you@example.com'])`` → a record with
     ``agent, address, fqdn, ptr, state``. Release (irreversible):
@@ -584,9 +587,9 @@ def identity(
 def agent(agent_or_address: str, *, key: Optional[str] = None, timeout: int = 60) -> dict:
     """One agent's detail and counters (``op:agent``). **Pure-HTTP, key required.**
 
-    Accepts either selector (liberal): an agent id, or a ``/128`` address — a value
+    Accepts either selector (liberal): an agent id, or a ``/128`` address, a value
     containing ``:`` is treated as an address. Returns the detail record (``address, fqdn,
-    ptr, label, state, dns_queries, bytes_up, …``).
+    ptr, label, state, dns_queries, bytes_up, ...``).
     """
     selector = (agent_or_address or "").strip()
     if not selector:
@@ -594,3 +597,28 @@ def agent(agent_or_address: str, *, key: Optional[str] = None, timeout: int = 60
     args = {"address": selector} if ":" in selector else {"agent": selector}
     recs = _control("agent", args, key=key, timeout=timeout)
     return recs[0] if recs else {}
+
+
+# ---------------------------------------------------------------------------------------
+# Keyed graph namespace - the Whisper security graph (Cypher). Imported last so the shared
+# keyed plumbing above (_http_post, _api_key, _control_url, _records, _problem_detail) is
+# already defined when graph.py binds to it. It is Cypher, and Cypher needs an API key, so
+# the whole namespace sits on the SAME keyed transport as the control plane - not the
+# keyless verify/rdap surface (Kaveh's rule: if it is Cypher, it needs a key).
+# ---------------------------------------------------------------------------------------
+from .graph import Graph  # noqa: E402  (deferred: needs the helpers defined above)
+
+
+def graph(api_key: Optional[str] = None, *, timeout: int = 60) -> Graph:
+    """Open the keyed Whisper security graph (functional-style factory for :class:`Graph`).
+
+    The key is resolved through the shared ``_api_key`` gate at call time (arg, or
+    ``WHISPER_API_KEY``), exactly like the rest of the control plane. Cypher needs a key,
+    so every verb here is keyed; the keyless half of Whisper stays ``verify``/``rdap``.
+
+        from whisper_id import graph
+        g = graph()                       # key from WHISPER_API_KEY (or graph('whisper_live_...'))
+        g.identify('api.openai.com')      # -> [{host, vendor_id, canonical_name, ...}]
+        g.query('CALL db.schema()')       # raw escape hatch for any read Cypher
+    """
+    return Graph(api_key, timeout=timeout)

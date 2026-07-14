@@ -4,7 +4,7 @@ on:
     types: [published]
 permissions:
   contents: read
-  id-token: write   # OIDC — PyPI Trusted Publishing (no API token/secret)
+  id-token: write   # OIDC: PyPI Trusted Publishing (no API token/secret)
 jobs:
   pypi:
     runs-on: ubuntu-latest
