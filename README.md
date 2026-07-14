@@ -107,14 +107,19 @@ g.identify("api.openai.com")                 # vendor + operator role behind a h
 g.assess("8.8.8.8")                          # labelled threat posture
 g.origins("cloudflare.com")                  # real origin IPs behind a CDN
 g.explain("paypal.com")                      # threat-feed score + why
+g.typosquat("paypal.com")                    # multi-step flow (look-alike sweep), streamed
+g.run_flow("typosquat", {"domain": "paypal.com"})   # any flow by its catalog slug
 g.query("CALL db.schema()")                  # raw escape hatch for any read Cypher
 ```
 
-Each call returns a list of column-keyed dicts (`[{col: val, ...}]`). Fourteen `direct` verbs
-run their Cypher against the graph; the fifteen multi-step `flow` verbs (`attackSurface`,
-`typosquat`, `infrastructureMapping`, ...) run via the Whisper workflow runner, so they are
-present but raise `NotImplementedError` pointing at the runner until that endpoint is public.
-Use `g.query(...)` for their individual direct steps in the meantime.
+Fourteen `direct` verbs run their Cypher against the graph and return a list of column-keyed
+dicts (`[{col: val, ...}]`). The fifteen multi-step `flow` verbs (`attackSurface`, `typosquat`,
+`infrastructureMapping`, ...) run keyed via the gallery flow runner
+(`console.whisper.security/api/gallery/run`, a Server-Sent-Events stream): they return
+`{slug, steps, context, output, totalLatencyMs}` and stream per-step progress through an
+optional `on_event(name, data)` callback. `g.run_flow(slug, inputs, params)` runs any flow by
+its catalog slug. Every method's docstring links its docs page under
+[whisper.security/docs](https://www.whisper.security/docs).
 
 ## Requirements
 

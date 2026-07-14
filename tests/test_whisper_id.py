@@ -474,20 +474,148 @@ def test_graph_non_json_reply_raises(monkeypatch):
         graph().identify("api.openai.com")
 
 
-_FLOW_METHODS = [
-    "anycastDnsRootSovereignty", "attackPath", "attackSurface", "bgpHijackExposure",
-    "blastRadius", "buildTakedownEvidencePackage", "discoverAiAgentInfrastructure",
-    "indicator", "indicatorEnrichment", "infrastructureMapping",
-    "mapSupplyChainConcentration", "nameserverHijackDnsConsistency", "routeHealth",
-    "subdomainTakeover", "typosquat",
+# Every flow verb -> (catalog slug, default inputs it must POST to the gallery runner).
+_FLOWS = {
+    "anycastDnsRootSovereignty": ("anycast-dns-root-sovereignty", {"country": "BR"}),
+    "attackPath": ("attack-path", {"value": "paypal.com", "other": "paypa1.com"}),
+    "attackSurface": ("attack-surface", {"domain": "github.com"}),
+    "bgpHijackExposure": ("bgp-hijack-exposure", {"value": "AS13335"}),
+    "blastRadius": ("blast-radius", {"indicator": "ns1.dreamhost.com"}),
+    "buildTakedownEvidencePackage": ("build-takedown-evidence-package", {"domain": "ickaoex.com"}),
+    "discoverAiAgentInfrastructure": ("discover-ai-agent-infrastructure", {"value": "github.com"}),
+    "indicator": ("indicator", {"indicator": "theblackservicenetwork.com"}),
+    "indicatorEnrichment": ("indicator-enrichment", {"value": "google.com"}),
+    "infrastructureMapping": ("infrastructure-mapping", {"value": "cloudflare.com"}),
+    "mapSupplyChainConcentration": ("map-supply-chain-concentration", {"domain": "atlassian.com"}),
+    "nameserverHijackDnsConsistency": ("nameserver-hijack-dns-consistency", {"value": "google.com"}),
+    "routeHealth": ("route-health", {"target": "1.1.1.0/24"}),
+    "subdomainTakeover": ("subdomain-takeover", {"value": "github.com"}),
+    "typosquat": ("typosquat", {"domain": "paypal.com"}),
+}
+_FLOW_METHODS = sorted(_FLOWS)
+
+# A canned gallery-run SSE stream, shaped like the live runner emits it.
+_CANNED_EVENTS = [
+    ("start", {"slug": "typosquat"}),
+    ("step-start", {"id": "registered", "index": 0}),
+    ("step", {"id": "registered", "status": "done",
+              "columns": ["variant"], "rows": [{"variant": "paypa1.com"}]}),
+    ("graph", {"stepId": "registered", "delta": {"nodes": [], "edges": []}}),
+    ("step", {"id": "__present", "status": "done", "output": {"kind": "report"}}),
+    ("complete", {"totalLatencyMs": 42, "context": {"registered": [{"variant": "paypa1.com"}]}}),
 ]
 
 
+def _gsse(monkeypatch, events):
+    """Stub the SSE flow transport; capture the (url, slug, inputs, params, api_key) sent."""
+    seen = {}
+
+    def fake_sse(url, payload, *, api_key, timeout):
+        parsed = json.loads(payload)
+        seen.update(url=url, slug=parsed["slug"], inputs=parsed["inputs"],
+                    params=parsed["params"], api_key=api_key)
+        for name, data in events:
+            yield name, data if isinstance(data, str) else json.dumps(data)
+
+    monkeypatch.setattr(graph_mod, "_sse_post", fake_sse)
+    return seen
+
+
 @pytest.mark.parametrize("name", _FLOW_METHODS)
-def test_graph_flow_methods_stub_with_workflow_note(name):
-    g = graph()
-    with pytest.raises(NotImplementedError, match="workflow runner"):
-        getattr(g, name)()
+def test_graph_flow_methods_run_via_gallery(monkeypatch, name):
+    slug, inputs = _FLOWS[name]
+    seen = _gsse(monkeypatch, _CANNED_EVENTS)
+    out = getattr(graph(), name)()
+    assert seen["url"] == graph_mod._flow_run_url()
+    assert seen["slug"] == slug
+    assert seen["inputs"] == inputs  # catalog defaults travel as the flow inputs
+    assert seen["params"] == {}
+    assert seen["api_key"] == "whisper_live_TESTKEY"
+    assert out["slug"] == slug
+    assert out["context"] == {"registered": [{"variant": "paypa1.com"}]}
+
+
+def test_graph_run_flow_collects_steps_context_output(monkeypatch):
+    seen = _gsse(monkeypatch, _CANNED_EVENTS)
+    out = graph().run_flow("typosquat", {"domain": "paypa1.com"}, {"depth": 2})
+    assert seen["slug"] == "typosquat"
+    assert seen["inputs"] == {"domain": "paypa1.com"}
+    assert seen["params"] == {"depth": 2}
+    assert [s["id"] for s in out["steps"]] == ["registered", "__present"]
+    assert out["output"] == {"kind": "report"}
+    assert out["totalLatencyMs"] == 42
+    assert out["context"] == {"registered": [{"variant": "paypa1.com"}]}
+
+
+def test_graph_flow_on_event_streams_every_event(monkeypatch):
+    _gsse(monkeypatch, _CANNED_EVENTS)
+    heard = []
+    graph().typosquat(on_event=lambda name, data: heard.append(name))
+    assert heard == ["start", "step-start", "step", "graph", "step", "complete"]
+
+
+def test_graph_flow_error_event_raises(monkeypatch):
+    _gsse(monkeypatch, [
+        ("start", {"slug": "typosquat"}),
+        ("error", {"message": "Graph query failed (403)."}),
+    ])
+    with pytest.raises(WhisperError, match=r"flow 'typosquat' failed: Graph query failed"):
+        graph().typosquat()
+
+
+def test_graph_flow_non_json_event_tolerated(monkeypatch):
+    # Postel-liberal: a non-JSON data payload is kept as {"raw": ...}, never a crash.
+    _gsse(monkeypatch, [("step", "not json"), ("complete", {"context": {}})])
+    out = graph().run_flow("typosquat")
+    assert out["steps"] == [{"raw": "not json"}]
+
+
+def test_graph_flow_no_key_raises_shared_error(monkeypatch):
+    monkeypatch.delenv("WHISPER_API_KEY", raising=False)
+    with pytest.raises(WhisperError, match="no API key"):
+        Graph().typosquat()
+
+
+def test_graph_sse_parser_streams_pairs():
+    # Feed the raw-wire SSE framing through the parser via a stubbed urlopen response.
+    class FakeResp:
+        status = 200
+        lines = [b"event: start\n", b"data: {\"slug\":\"x\"}\n", b"\n",
+                 b": comment\n", b"data: 1\n", b"data: 2\n", b"\r\n",
+                 b"event: complete\n", b"data: {}\n"]  # last event: EOF without blank line
+
+        def __iter__(self):
+            return iter(self.lines)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    def fake_urlopen(req, timeout):
+        assert req.headers["X-api-key"] == "k"
+        assert req.headers["Accept"] == "text/event-stream"
+        return FakeResp()
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(graph_mod.urllib.request, "urlopen", fake_urlopen)
+    try:
+        pairs = list(graph_mod._sse_post("https://x/api/gallery/run", b"{}", api_key="k", timeout=5))
+    finally:
+        monkeypatch.undo()
+    assert pairs == [("start", '{"slug":"x"}'), ("message", "1\n2"), ("complete", "{}")]
+
+
+def test_graph_submit_sends_real_cypher_and_drops_none(monkeypatch):
+    seen = _gpost(monkeypatch, 200, json.dumps({"columns": [], "rows": []}))
+    graph().submit(kind="indicator", identifier_kind="ip", value="203.0.113.5")
+    assert seen["query"] == (
+        "CALL whisper.submit({kind:$kind, identifier_kind:$identifier_kind, value:$value})")
+    assert "/*" not in seen["query"]  # the placeholder-comment Cypher is gone
+    # None-valued optional args are omitted: the graph API wants absent, not null.
+    assert seen["parameters"] == {
+        "kind": "indicator", "identifier_kind": "ip", "value": "203.0.113.5"}
 
 
 def test_graph_factory_passes_timeout():
@@ -496,10 +624,19 @@ def test_graph_factory_passes_timeout():
     assert g._timeout == 5
 
 
+_DIRECT_METHODS = ["identify", "assess", "variants", "walk", "explain", "pslTldplusone",
+                   "pslAffiliation", "origins", "history", "historyWhois", "asset",
+                   "lookupTorRelay", "dbSchema", "submit"]
+
+
 def test_graph_all_catalog_methods_present():
-    # 14 direct + 15 flow = 29 verbs, plus the raw query() escape hatch.
-    direct = ["identify", "assess", "variants", "walk", "explain", "pslTldplusone",
-              "pslAffiliation", "origins", "history", "historyWhois", "asset",
-              "lookupTorRelay", "dbSchema", "submit"]
-    for name in direct + _FLOW_METHODS:
+    # 14 direct + 15 flow = 29 verbs, plus query() and run_flow().
+    for name in _DIRECT_METHODS + _FLOW_METHODS + ["query", "run_flow"]:
         assert callable(getattr(Graph, name)), name
+
+
+@pytest.mark.parametrize("name", _DIRECT_METHODS + _FLOW_METHODS + ["query", "run_flow"])
+def test_graph_every_method_links_its_docs(name):
+    # Every named verb carries its catalog docs link (docsBase + docPath).
+    doc = getattr(Graph, name).__doc__ or ""
+    assert "See: https://www.whisper.security/" in doc, name
