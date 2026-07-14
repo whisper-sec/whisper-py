@@ -175,18 +175,47 @@ class Graph:
     ) -> Dict[str, Any]:
         """Run any catalog flow by its slug via the gallery flow runner (keyed, SSE).
 
-        POSTs ``{"slug", "inputs", "params"}`` to the flow-run endpoint and consumes the
+        POSTs ``{"slug", "value", "paramValues"}`` to the flow-run endpoint and consumes the
         Server-Sent-Events stream: per-step tables accumulate under ``steps``, the final
         ``complete`` event's per-step rows land in ``context``, and the formatted report
         (when the flow presents one) in ``output``. ``on_event(name, data)`` fires for
         every streamed event as it arrives (start / step-start / step / graph / prune /
         complete). A streamed ``error`` event raises :class:`WhisperError`.
 
+        The runner's wire contract is {slug, value, paramValues}: ``value`` is the ONE
+        primary entity (a host / IP / ASN), or ``values`` for a bulk list; ``paramValues``
+        carries every other input plus every tuning knob. The FIRST ``inputs`` entry becomes
+        the anchor ``value``; every other input and every ``params`` knob rides in
+        ``paramValues``. We send ONLY the keys the runner reads: an ``inputs``/``params`` map
+        is silently ignored, so the flow would fall back to its default anchor.
+
         See: https://www.whisper.security/docs/recipes
         """
-        payload = json.dumps(
-            {"slug": slug, "inputs": inputs or {}, "params": params or {}}
-        ).encode("utf-8")
+        param_values: Dict[str, Any] = {}
+        value: Optional[Any] = None
+        values: Optional[List[str]] = None
+        first = True
+        for _name, _val in (inputs or {}).items():
+            if _val is None:
+                continue
+            if first:
+                if isinstance(_val, (list, tuple)):
+                    values = [str(x) for x in _val]
+                else:
+                    value = str(_val)
+                first = False
+            else:
+                param_values[_name] = _val
+        for _key, _val in (params or {}).items():
+            param_values[_key] = _val
+        body: Dict[str, Any] = {"slug": slug}
+        if value is not None:
+            body["value"] = value
+        if values is not None:
+            body["values"] = values
+        if param_values:
+            body["paramValues"] = param_values
+        payload = json.dumps(body).encode("utf-8")
         result: Dict[str, Any] = {
             "slug": slug, "steps": [], "context": {}, "output": None, "totalLatencyMs": None,
         }
@@ -218,7 +247,7 @@ class Graph:
         """Assess how resilient a country's core DNS is if it were cut off from the world.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'anycast-dns-root-sovereignty', inputs, params} and consumes the event stream. Returns
+        {slug: 'anycast-dns-root-sovereignty', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: distinctLetters, totalInstances, globalCount, localCount, hostingAsns.
 
@@ -230,7 +259,7 @@ class Graph:
         """Find the choke points an attacker would target - and how any two things connect.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'attack-path', inputs, params} and consumes the event stream. Returns
+        {slug: 'attack-path', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: indicator, type, available, cached, found, score, level, explanation, factors, sources, advisory.
 
@@ -242,7 +271,7 @@ class Graph:
         """Map everything about a domain that's exposed to the outside world, scored for risk.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'attack-surface', inputs, params} and consumes the event stream. Returns
+        {slug: 'attack-surface', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: indicator, type, available, cached, found, score, level, explanation, factors, sources, advisory.
 
@@ -254,7 +283,7 @@ class Graph:
         """Grade a network's routing security and trace conflicts to the domains they'd expose.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'bgp-hijack-exposure', inputs, params} and consumes the event stream. Returns
+        {slug: 'bgp-hijack-exposure', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: prefix, is_moas, conflicting_asn.
 
@@ -266,7 +295,7 @@ class Graph:
         """Pick one asset and see what would break if it failed - and what it depends on in turn.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'blast-radius', inputs, params} and consumes the event stream. Returns
+        {slug: 'blast-radius', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: labels, name.
 
@@ -278,7 +307,7 @@ class Graph:
         """Assemble a ready-to-submit dossier for taking down a scam or phishing domain.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'build-takedown-evidence-package', inputs, params} and consumes the event stream. Returns
+        {slug: 'build-takedown-evidence-package', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: indicator, type, available, cached, found, score, level, explanation, factors, sources, advisory.
 
@@ -290,7 +319,7 @@ class Graph:
         """Map an organisation's externally visible AI and agent endpoints from the outside.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'discover-ai-agent-infrastructure', inputs, params} and consumes the event stream. Returns
+        {slug: 'discover-ai-agent-infrastructure', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: hostname, ips.
 
@@ -302,7 +331,7 @@ class Graph:
         """Investigate one suspicious domain, IP, or network in depth and get a clear picture of the threat and everything connected to it.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'indicator', inputs, params} and consumes the event stream. Returns
+        {slug: 'indicator', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: host, label, band, sub_labels, coverage, evidence.
 
@@ -314,7 +343,7 @@ class Graph:
         """Turn one domain or IP into a full context card - owner, hosting, mail, location, reputation at a glance.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'indicator-enrichment', inputs, params} and consumes the event stream. Returns
+        {slug: 'indicator-enrichment', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: attribute, value.
 
@@ -326,7 +355,7 @@ class Graph:
         """Trace one indicator to its true owner and full estate, even behind privacy screens and CDNs.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'infrastructure-mapping', inputs, params} and consumes the event stream. Returns
+        {slug: 'infrastructure-mapping', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: canonical_name, vendor_id, category, roles, host_class.
 
@@ -338,7 +367,7 @@ class Graph:
         """Grade an organisation for over-reliance on single providers, regions, or facilities.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'map-supply-chain-concentration', inputs, params} and consumes the event stream. Returns
+        {slug: 'map-supply-chain-concentration', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: provider, asn, region, country.
 
@@ -350,7 +379,7 @@ class Graph:
         """Check a domain's name servers for the misconfigurations that enable DNS hijacking.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'nameserver-hijack-dns-consistency', inputs, params} and consumes the event stream. Returns
+        {slug: 'nameserver-hijack-dns-consistency', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: nameserver, ips, status.
 
@@ -362,7 +391,7 @@ class Graph:
         """Profile a network or address block into a full routing and reachability health card.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'route-health', inputs, params} and consumes the event stream. Returns
+        {slug: 'route-health', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: prefix, multi_origin, anycast, withdrawn.
 
@@ -374,7 +403,7 @@ class Graph:
         """Find subdomains that point at abandoned services an attacker could claim.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'subdomain-takeover', inputs, params} and consumes the event stream. Returns
+        {slug: 'subdomain-takeover', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: subdomain, ips.
 
@@ -386,7 +415,7 @@ class Graph:
         """Find registered look-alikes of your brand and check which ones are dangerous.
 
         Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
-        {slug: 'typosquat', inputs, params} and consumes the event stream. Returns
+        {slug: 'typosquat', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: variant, method, confidence.
 

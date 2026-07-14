@@ -474,23 +474,25 @@ def test_graph_non_json_reply_raises(monkeypatch):
         graph().identify("api.openai.com")
 
 
-# Every flow verb -> (catalog slug, default inputs it must POST to the gallery runner).
+# Every flow verb -> (catalog slug, the anchor `value`, the `paramValues` map) it must POST
+# to the gallery runner. The FIRST catalog input is the anchor `value`; any extra input
+# (e.g. attackPath's `other`) rides in `paramValues`.
 _FLOWS = {
-    "anycastDnsRootSovereignty": ("anycast-dns-root-sovereignty", {"country": "BR"}),
-    "attackPath": ("attack-path", {"value": "paypal.com", "other": "paypa1.com"}),
-    "attackSurface": ("attack-surface", {"domain": "github.com"}),
-    "bgpHijackExposure": ("bgp-hijack-exposure", {"value": "AS13335"}),
-    "blastRadius": ("blast-radius", {"indicator": "ns1.dreamhost.com"}),
-    "buildTakedownEvidencePackage": ("build-takedown-evidence-package", {"domain": "ickaoex.com"}),
-    "discoverAiAgentInfrastructure": ("discover-ai-agent-infrastructure", {"value": "github.com"}),
-    "indicator": ("indicator", {"indicator": "theblackservicenetwork.com"}),
-    "indicatorEnrichment": ("indicator-enrichment", {"value": "google.com"}),
-    "infrastructureMapping": ("infrastructure-mapping", {"value": "cloudflare.com"}),
-    "mapSupplyChainConcentration": ("map-supply-chain-concentration", {"domain": "atlassian.com"}),
-    "nameserverHijackDnsConsistency": ("nameserver-hijack-dns-consistency", {"value": "google.com"}),
-    "routeHealth": ("route-health", {"target": "1.1.1.0/24"}),
-    "subdomainTakeover": ("subdomain-takeover", {"value": "github.com"}),
-    "typosquat": ("typosquat", {"domain": "paypal.com"}),
+    "anycastDnsRootSovereignty": ("anycast-dns-root-sovereignty", "BR", {}),
+    "attackPath": ("attack-path", "paypal.com", {"other": "paypa1.com"}),
+    "attackSurface": ("attack-surface", "github.com", {}),
+    "bgpHijackExposure": ("bgp-hijack-exposure", "AS13335", {}),
+    "blastRadius": ("blast-radius", "ns1.dreamhost.com", {}),
+    "buildTakedownEvidencePackage": ("build-takedown-evidence-package", "ickaoex.com", {}),
+    "discoverAiAgentInfrastructure": ("discover-ai-agent-infrastructure", "github.com", {}),
+    "indicator": ("indicator", "theblackservicenetwork.com", {}),
+    "indicatorEnrichment": ("indicator-enrichment", "google.com", {}),
+    "infrastructureMapping": ("infrastructure-mapping", "cloudflare.com", {}),
+    "mapSupplyChainConcentration": ("map-supply-chain-concentration", "atlassian.com", {}),
+    "nameserverHijackDnsConsistency": ("nameserver-hijack-dns-consistency", "google.com", {}),
+    "routeHealth": ("route-health", "1.1.1.0/24", {}),
+    "subdomainTakeover": ("subdomain-takeover", "github.com", {}),
+    "typosquat": ("typosquat", "paypal.com", {}),
 }
 _FLOW_METHODS = sorted(_FLOWS)
 
@@ -507,13 +509,13 @@ _CANNED_EVENTS = [
 
 
 def _gsse(monkeypatch, events):
-    """Stub the SSE flow transport; capture the (url, slug, inputs, params, api_key) sent."""
+    """Stub the SSE flow transport; capture the (url, slug, value, paramValues, api_key) sent."""
     seen = {}
 
     def fake_sse(url, payload, *, api_key, timeout):
         parsed = json.loads(payload)
-        seen.update(url=url, slug=parsed["slug"], inputs=parsed["inputs"],
-                    params=parsed["params"], api_key=api_key)
+        seen.update(url=url, slug=parsed["slug"], value=parsed.get("value"),
+                    param_values=parsed.get("paramValues", {}), api_key=api_key)
         for name, data in events:
             yield name, data if isinstance(data, str) else json.dumps(data)
 
@@ -523,13 +525,13 @@ def _gsse(monkeypatch, events):
 
 @pytest.mark.parametrize("name", _FLOW_METHODS)
 def test_graph_flow_methods_run_via_gallery(monkeypatch, name):
-    slug, inputs = _FLOWS[name]
+    slug, value, param_values = _FLOWS[name]
     seen = _gsse(monkeypatch, _CANNED_EVENTS)
     out = getattr(graph(), name)()
     assert seen["url"] == graph_mod._flow_run_url()
     assert seen["slug"] == slug
-    assert seen["inputs"] == inputs  # catalog defaults travel as the flow inputs
-    assert seen["params"] == {}
+    assert seen["value"] == value  # first catalog input -> the anchor value
+    assert seen["param_values"] == param_values  # extra inputs + knobs -> paramValues
     assert seen["api_key"] == "whisper_live_TESTKEY"
     assert out["slug"] == slug
     assert out["context"] == {"registered": [{"variant": "paypa1.com"}]}
@@ -539,8 +541,8 @@ def test_graph_run_flow_collects_steps_context_output(monkeypatch):
     seen = _gsse(monkeypatch, _CANNED_EVENTS)
     out = graph().run_flow("typosquat", {"domain": "paypa1.com"}, {"depth": 2})
     assert seen["slug"] == "typosquat"
-    assert seen["inputs"] == {"domain": "paypa1.com"}
-    assert seen["params"] == {"depth": 2}
+    assert seen["value"] == "paypa1.com"
+    assert seen["param_values"] == {"depth": 2}
     assert [s["id"] for s in out["steps"]] == ["registered", "__present"]
     assert out["output"] == {"kind": "report"}
     assert out["totalLatencyMs"] == 42

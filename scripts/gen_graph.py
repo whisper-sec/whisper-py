@@ -244,18 +244,47 @@ class Graph:
     ) -> Dict[str, Any]:
         """Run any catalog flow by its slug via the gallery flow runner (keyed, SSE).
 
-        POSTs ``{"slug", "inputs", "params"}`` to the flow-run endpoint and consumes the
+        POSTs ``{"slug", "value", "paramValues"}`` to the flow-run endpoint and consumes the
         Server-Sent-Events stream: per-step tables accumulate under ``steps``, the final
         ``complete`` event's per-step rows land in ``context``, and the formatted report
         (when the flow presents one) in ``output``. ``on_event(name, data)`` fires for
         every streamed event as it arrives (start / step-start / step / graph / prune /
         complete). A streamed ``error`` event raises :class:`WhisperError`.
 
+        The runner's wire contract is {slug, value, paramValues}: ``value`` is the ONE
+        primary entity (a host / IP / ASN), or ``values`` for a bulk list; ``paramValues``
+        carries every other input plus every tuning knob. The FIRST ``inputs`` entry becomes
+        the anchor ``value``; every other input and every ``params`` knob rides in
+        ``paramValues``. We send ONLY the keys the runner reads: an ``inputs``/``params`` map
+        is silently ignored, so the flow would fall back to its default anchor.
+
         See: https://www.whisper.security/docs/recipes
         """
-        payload = json.dumps(
-            {"slug": slug, "inputs": inputs or {}, "params": params or {}}
-        ).encode("utf-8")
+        param_values: Dict[str, Any] = {}
+        value: Optional[Any] = None
+        values: Optional[List[str]] = None
+        first = True
+        for _name, _val in (inputs or {}).items():
+            if _val is None:
+                continue
+            if first:
+                if isinstance(_val, (list, tuple)):
+                    values = [str(x) for x in _val]
+                else:
+                    value = str(_val)
+                first = False
+            else:
+                param_values[_name] = _val
+        for _key, _val in (params or {}).items():
+            param_values[_key] = _val
+        body: Dict[str, Any] = {"slug": slug}
+        if value is not None:
+            body["value"] = value
+        if values is not None:
+            body["values"] = values
+        if param_values:
+            body["paramValues"] = param_values
+        payload = json.dumps(body).encode("utf-8")
         result: Dict[str, Any] = {
             "slug": slug, "steps": [], "context": {}, "output": None, "totalLatencyMs": None,
         }
@@ -325,7 +354,7 @@ def _emit_method(m: dict, docs_base: str) -> str:
         lines = [f"    def {name}({sig}) -> Dict[str, Any]:"]
         doc = [f'        """{summary}', ""]
         doc.append("        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs")
-        doc.append(f"        {{slug: {slug!r}, inputs, params}} and consumes the event stream. Returns")
+        doc.append(f"        {{slug: {slug!r}, value, paramValues}} and consumes the event stream. Returns")
         doc.append("        {slug, steps, context, output, totalLatencyMs}; on_event streams progress.")
         doc.append(f"        Anchor columns: {cols}.")
         doc.append("")
