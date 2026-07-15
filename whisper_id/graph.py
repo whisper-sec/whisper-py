@@ -36,7 +36,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from . import WhisperError, __version__, _api_key, _control_url, _http_post, _problem_detail, _records
+from . import WhisperError, __version__, _api_key, _api_key_optional, _control_url, _http_post, _problem_detail, _records
 
 import json
 import os
@@ -141,11 +141,16 @@ def _graph_query(
 
 
 class Graph:
-    """A keyed client for the Whisper security graph (Cypher, so a key is required).
+    """A client for the Whisper security graph (Cypher). Two-tier, both honest:
 
-    The key is resolved lazily through the shared ``_api_key`` gate, so a missing key
-    raises the same helpful ``WhisperError`` as the rest of the control plane, at call
-    time. Pass it explicitly (``Graph("whisper_live_...")``) or set ``WHISPER_API_KEY``.
+    * the direct **read** verbs (assess, identify, explain, variants, walk, origins,
+      history, ...) run **keyless** -- no key, rate-limited (~100/window), real answers;
+    * raw ``query`` Cypher, the multi-step ``run_flow`` flows, and ``submit`` are
+      **keyed** -- pass a key (``Graph("whisper_live_...")``) or set ``WHISPER_API_KEY``.
+
+    A key is optional on the read verbs (it lifts the rate limit) and required on the
+    keyed ones (a missing key raises a helpful ``WhisperError`` at call time). Discover
+    the whole catalog with :meth:`recipes`.
     """
 
     def __init__(self, api_key: Optional[str] = None, *, timeout: int = 60) -> None:
@@ -153,7 +158,21 @@ class Graph:
         self._timeout = timeout
 
     def _q(self, cypher: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        # KEYED: raises a helpful error if no key is set.
         return _graph_query(cypher, params, api_key=_api_key(self._api_key), timeout=self._timeout)
+
+    def _q_keyless(self, cypher: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        # KEYLESS taste: sends the key iff there is one (unlimited), else no header
+        # (rate-limited ~100/window). Never raises for a missing key. (Postel: liberal in.)
+        return _graph_query(cypher, params, api_key=_api_key_optional(self._api_key), timeout=self._timeout)
+
+    def recipes(self) -> List[Dict[str, Any]]:
+        """Discover the whole catalog: every graph method here -- its name, whether it is
+        ``keyless``, its ``mode`` (direct read / multi-step flow), a one-line ``summary``,
+        its ``params``, and its ``docs_url``. No key, no network (baked from the Whisper
+        query catalog). Call any by name, or a flow by slug via :meth:`run_flow`.
+        """
+        return [dict(r) for r in _RECIPES]
 
     def query(self, cypher: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Run any read Cypher directly (the raw escape hatch), keyed like every verb.
@@ -426,139 +445,168 @@ class Graph:
     def identify(self, v: str = 'api.openai.com') -> List[Dict[str, Any]]:
         """Name the vendor and operator role behind a host or IP in one call.
 
-        Direct Cypher against the keyed graph (an API key is required).
+        Keyless direct read: runs with NO key as a rate-limited taste
+        (~100/window, real answers); pass a key (or set WHISPER_API_KEY)
+        to lift the limit.
         Columns: host, vendor_id, canonical_name, category, roles, host_class, band.
 
         See: https://www.whisper.security/docs/whisper-graph/procedures/identify
         """
-        return self._q('CALL whisper.identify([$v]) YIELD host, vendor_id, canonical_name, category, roles, host_class, band', _drop_none({'v': v}))
+        return self._q_keyless('CALL whisper.identify([$v]) YIELD host, vendor_id, canonical_name, category, roles, host_class, band', _drop_none({'v': v}))
 
     def assess(self, v: str = '8.8.8.8') -> List[Dict[str, Any]]:
         """Get a labelled threat posture for a host or IP - malicious, benign, or unknown.
 
-        Direct Cypher against the keyed graph (an API key is required).
+        Keyless direct read: runs with NO key as a rate-limited taste
+        (~100/window, real answers); pass a key (or set WHISPER_API_KEY)
+        to lift the limit.
         Columns: host, label, band, sub_labels, coverage, evidence.
 
         See: https://www.whisper.security/docs/whisper-graph/procedures
         """
-        return self._q('CALL whisper.assess([$v]) YIELD host, label, band, sub_labels, coverage, evidence', _drop_none({'v': v}))
+        return self._q_keyless('CALL whisper.assess([$v]) YIELD host, label, band, sub_labels, coverage, evidence', _drop_none({'v': v}))
 
     def variants(self, v: str = 'paypal.com') -> List[Dict[str, Any]]:
         """Generate look-alike domain variants of a brand and see which are registered.
 
-        Direct Cypher against the keyed graph (an API key is required).
+        Keyless direct read: runs with NO key as a rate-limited taste
+        (~100/window, real answers); pass a key (or set WHISPER_API_KEY)
+        to lift the limit.
         Columns: variant, method, exists, confidence.
 
         See: https://www.whisper.security/docs/whisper-graph/procedures/variants
         """
-        return self._q('CALL whisper.variants($v) YIELD variant, method, exists, confidence', _drop_none({'v': v}))
+        return self._q_keyless('CALL whisper.variants($v) YIELD variant, method, exists, confidence', _drop_none({'v': v}))
 
     def walk(self, v: str = 'cloudflare.com') -> List[Dict[str, Any]]:
         """Walk the graph to the nearest known vendors behind a host, with the channel and confidence.
 
-        Direct Cypher against the keyed graph (an API key is required).
+        Keyless direct read: runs with NO key as a rate-limited taste
+        (~100/window, real answers); pass a key (or set WHISPER_API_KEY)
+        to lift the limit.
         Columns: coverage, host, nearest_known_vendors, no_atlas_match, siblings.
 
         See: https://www.whisper.security/docs/whisper-graph/procedures
         """
-        return self._q('CALL whisper.walk($v) YIELD coverage, host, nearest_known_vendors, no_atlas_match, siblings', _drop_none({'v': v}))
+        return self._q_keyless('CALL whisper.walk($v) YIELD coverage, host, nearest_known_vendors, no_atlas_match, siblings', _drop_none({'v': v}))
 
     def explain(self, v: str = 'paypal.com') -> List[Dict[str, Any]]:
         """Score an indicator against the threat feeds and explain exactly why.
 
-        Direct Cypher against the keyed graph (an API key is required).
+        Keyless direct read: runs with NO key as a rate-limited taste
+        (~100/window, real answers); pass a key (or set WHISPER_API_KEY)
+        to lift the limit.
         Columns: indicator, score, level, explanation, sources.
 
         See: https://www.whisper.security/docs/whisper-graph/procedures/explain
         """
-        return self._q('CALL whisper.explain($v) YIELD indicator, score, level, explanation, sources', _drop_none({'v': v}))
+        return self._q_keyless('CALL whisper.explain($v) YIELD indicator, score, level, explanation, sources', _drop_none({'v': v}))
 
     def pslTldplusone(self, v: str = 'www.foo.co.uk') -> List[Dict[str, Any]]:
         """Reduce any hostname to its registrable apex (eTLD+1) via the Public Suffix List.
 
-        Direct Cypher against the keyed graph (an API key is required).
+        Keyless direct read: runs with NO key as a rate-limited taste
+        (~100/window, real answers); pass a key (or set WHISPER_API_KEY)
+        to lift the limit.
         Columns: apex.
 
         See: https://www.whisper.security/docs/whisper-graph/procedures/helpers
         """
-        return self._q('CALL whisper.psl.tldPlusOne($v) YIELD apex', _drop_none({'v': v}))
+        return self._q_keyless('CALL whisper.psl.tldPlusOne($v) YIELD apex', _drop_none({'v': v}))
 
     def pslAffiliation(self, v: str = 'paypal.com') -> List[Dict[str, Any]]:
         """Check whether a domain is a PSL private-section suffix and who submitted it.
 
-        Direct Cypher against the keyed graph (an API key is required).
+        Keyless direct read: runs with NO key as a rate-limited taste
+        (~100/window, real answers); pass a key (or set WHISPER_API_KEY)
+        to lift the limit.
         Columns: found, suffix, submitterOrg, submitterLogin, evidenceKind, confidence.
 
         See: https://www.whisper.security/docs/whisper-graph/procedures/helpers
         """
-        return self._q('CALL whisper.psl.affiliation($v) YIELD found, suffix, submitterOrg, submitterLogin, evidenceKind, confidence', _drop_none({'v': v}))
+        return self._q_keyless('CALL whisper.psl.affiliation($v) YIELD found, suffix, submitterOrg, submitterLogin, evidenceKind, confidence', _drop_none({'v': v}))
 
     def origins(self, v: str = 'cloudflare.com') -> List[Dict[str, Any]]:
         """Find the real origin IPs behind a CDN-fronted domain, ranked by confidence.
 
-        Direct Cypher against the keyed graph (an API key is required).
+        Keyless direct read: runs with NO key as a rate-limited taste
+        (~100/window, real answers); pass a key (or set WHISPER_API_KEY)
+        to lift the limit.
         Columns: ip, confidence, methods, asn, asnName, kind.
 
         See: https://www.whisper.security/docs/whisper-graph/procedures/origins
         """
-        return self._q('CALL whisper.origins($v) YIELD ip, confidence, methods, asn, asnName, kind', _drop_none({'v': v}))
+        return self._q_keyless('CALL whisper.origins($v) YIELD ip, confidence, methods, asn, asnName, kind', _drop_none({'v': v}))
 
     def history(self, v: str = 'paypal.com') -> List[Dict[str, Any]]:
         """Get the full historical WHOIS timeline for a domain.
 
-        Direct Cypher against the keyed graph (an API key is required).
+        Keyless direct read: runs with NO key as a rate-limited taste
+        (~100/window, real answers); pass a key (or set WHISPER_API_KEY)
+        to lift the limit.
         Columns: indicator, type, queryTime, createDate, updateDate, expiryDate, registrar, registrant, country, nameServers, cached.
 
         See: https://www.whisper.security/docs/whisper-graph/procedures/history
         """
-        return self._q('CALL whisper.history($v)', _drop_none({'v': v}))
+        return self._q_keyless('CALL whisper.history($v)', _drop_none({'v': v}))
 
     def historyWhois(self, v: str = 'paypal.com') -> List[Dict[str, Any]]:
         """Get the WHOIS-only historical timeline for a domain.
 
-        Direct Cypher against the keyed graph (an API key is required).
+        Keyless direct read: runs with NO key as a rate-limited taste
+        (~100/window, real answers); pass a key (or set WHISPER_API_KEY)
+        to lift the limit.
         Columns: queryTime, createDate, updateDate, expiryDate, registrar, registrant, country, nameServers.
 
         See: https://www.whisper.security/docs/whisper-graph/procedures/history
         """
-        return self._q('CALL whisper.history.whois($v) YIELD queryTime, createDate, updateDate, expiryDate, registrar, registrant, country, nameServers', _drop_none({'v': v}))
+        return self._q_keyless('CALL whisper.history.whois($v) YIELD queryTime, createDate, updateDate, expiryDate, registrar, registrant, country, nameServers', _drop_none({'v': v}))
 
     def asset(self, v: str = 'AS-CLOUDFLARE') -> List[Dict[str, Any]]:
         """List the member ASNs of an AS-SET macro.
 
-        Direct Cypher against the keyed graph (an API key is required).
+        Keyless direct read: runs with NO key as a rate-limited taste
+        (~100/window, real answers); pass a key (or set WHISPER_API_KEY)
+        to lift the limit.
         Columns: asSetName, memberAsn, sourceRir.
 
         See: https://www.whisper.security/docs/whisper-graph/procedures
         """
-        return self._q('CALL whisper.asSet($v) YIELD asSetName, memberAsn, sourceRir', _drop_none({'v': v}))
+        return self._q_keyless('CALL whisper.asSet($v) YIELD asSetName, memberAsn, sourceRir', _drop_none({'v': v}))
 
     def lookupTorRelay(self, v: str = '185.220.101.33') -> List[Dict[str, Any]]:
         """Check whether an IP is a known Tor exit relay.
 
-        Direct Cypher against the keyed graph (an API key is required).
+        Keyless direct read: runs with NO key as a rate-limited taste
+        (~100/window, real answers); pass a key (or set WHISPER_API_KEY)
+        to lift the limit.
         Columns: indicator, found, fingerprint, exitAddressCount, source, ingestedAt.
 
         See: https://www.whisper.security/docs/whisper-graph/procedures/helpers
         """
-        return self._q('CALL whisper.lookupTorRelay($v) YIELD indicator, found, fingerprint, exitAddressCount, source, ingestedAt', _drop_none({'v': v}))
+        return self._q_keyless('CALL whisper.lookupTorRelay($v) YIELD indicator, found, fingerprint, exitAddressCount, source, ingestedAt', _drop_none({'v': v}))
 
     def dbSchema(self) -> List[Dict[str, Any]]:
         """List every node and relationship type in the graph with counts and examples.
 
-        Direct Cypher against the keyed graph (an API key is required).
+        Keyless direct read: runs with NO key as a rate-limited taste
+        (~100/window, real answers); pass a key (or set WHISPER_API_KEY)
+        to lift the limit.
         Columns: type, name, count, description, example, sourceLabels, targetLabels, fastPatterns, slowPatterns, bestPractices.
 
         See: https://www.whisper.security/docs/whisper-graph/schema
         """
-        return self._q('CALL db.schema()', {})
+        return self._q_keyless('CALL db.schema()', {})
 
     def submit(self, kind: str = 'indicator', identifier_kind: str = 'ip', value: str = '203.0.113.5', observation_id: Optional[str] = None, confidence: Optional[float] = None, first_seen: Optional[str] = None, provenance: Optional[str] = None, query: Optional[str] = None, results: Optional[Any] = None, comment: Optional[str] = None, severity: Optional[str] = None, v: Optional[float] = None) -> List[Dict[str, Any]]:
         """Contribute an indicator observation or feedback back into the graph (requires an API key).
 
-        Direct Cypher against the keyed graph (an API key is required).
+        Direct Cypher against the graph; an API key is required.
         Columns: observation_id, kind, accepted, idempotent, promotion_state, k_bucket, advisory, v.
 
         See: https://www.whisper.security/docs/cypher-api
         """
         return self._q('CALL whisper.submit({kind:$kind, identifier_kind:$identifier_kind, value:$value})', _drop_none({'kind': kind, 'identifier_kind': identifier_kind, 'value': value, 'observation_id': observation_id, 'confidence': confidence, 'first_seen': first_seen, 'provenance': provenance, 'query': query, 'results': results, 'comment': comment, 'severity': severity, 'v': v}))
+
+
+_RECIPES = [{'method': 'anycastDnsRootSovereignty', 'keyless': False, 'mode': 'flow', 'summary': "Assess how resilient a country's core DNS is if it were cut off from the world.", 'params': ['country'], 'docs_url': 'https://www.whisper.security/docs/recipes/compliance'}, {'method': 'attackPath', 'keyless': False, 'mode': 'flow', 'summary': 'Find the choke points an attacker would target - and how any two things connect.', 'params': ['value', 'other'], 'docs_url': 'https://www.whisper.security/docs/recipes/attack-path'}, {'method': 'attackSurface', 'keyless': False, 'mode': 'flow', 'summary': "Map everything about a domain that's exposed to the outside world, scored for risk.", 'params': ['domain'], 'docs_url': 'https://www.whisper.security/docs/recipes/pentest-recon'}, {'method': 'bgpHijackExposure', 'keyless': False, 'mode': 'flow', 'summary': "Grade a network's routing security and trace conflicts to the domains they'd expose.", 'params': ['value'], 'docs_url': 'https://www.whisper.security/docs/recipes/bgp-routing'}, {'method': 'blastRadius', 'keyless': False, 'mode': 'flow', 'summary': 'Pick one asset and see what would break if it failed - and what it depends on in turn.', 'params': ['indicator'], 'docs_url': 'https://www.whisper.security/docs/recipes/soc'}, {'method': 'buildTakedownEvidencePackage', 'keyless': False, 'mode': 'flow', 'summary': 'Assemble a ready-to-submit dossier for taking down a scam or phishing domain.', 'params': ['domain'], 'docs_url': 'https://www.whisper.security/docs/recipes/threat-intel'}, {'method': 'discoverAiAgentInfrastructure', 'keyless': False, 'mode': 'flow', 'summary': "Map an organisation's externally visible AI and agent endpoints from the outside.", 'params': ['value'], 'docs_url': 'https://www.whisper.security/docs/recipes/pentest-recon'}, {'method': 'indicator', 'keyless': False, 'mode': 'flow', 'summary': 'Investigate one suspicious domain, IP, or network in depth and get a clear picture of the threat and everything connected to it.', 'params': ['indicator'], 'docs_url': 'https://www.whisper.security/docs/recipes/soc'}, {'method': 'indicatorEnrichment', 'keyless': False, 'mode': 'flow', 'summary': 'Turn one domain or IP into a full context card - owner, hosting, mail, location, reputation at a glance.', 'params': ['value'], 'docs_url': 'https://www.whisper.security/docs/recipes/dns-email'}, {'method': 'infrastructureMapping', 'keyless': False, 'mode': 'flow', 'summary': 'Trace one indicator to its true owner and full estate, even behind privacy screens and CDNs.', 'params': ['value'], 'docs_url': 'https://www.whisper.security/docs/recipes/compliance'}, {'method': 'mapSupplyChainConcentration', 'keyless': False, 'mode': 'flow', 'summary': 'Grade an organisation for over-reliance on single providers, regions, or facilities.', 'params': ['domain'], 'docs_url': 'https://www.whisper.security/docs/recipes/compliance'}, {'method': 'nameserverHijackDnsConsistency', 'keyless': False, 'mode': 'flow', 'summary': "Check a domain's name servers for the misconfigurations that enable DNS hijacking.", 'params': ['value'], 'docs_url': 'https://www.whisper.security/docs/recipes/dns-email'}, {'method': 'routeHealth', 'keyless': False, 'mode': 'flow', 'summary': 'Profile a network or address block into a full routing and reachability health card.', 'params': ['target'], 'docs_url': 'https://www.whisper.security/docs/recipes/bgp-routing'}, {'method': 'subdomainTakeover', 'keyless': False, 'mode': 'flow', 'summary': 'Find subdomains that point at abandoned services an attacker could claim.', 'params': ['value'], 'docs_url': 'https://www.whisper.security/docs/recipes/pentest-recon'}, {'method': 'typosquat', 'keyless': False, 'mode': 'flow', 'summary': 'Find registered look-alikes of your brand and check which ones are dangerous.', 'params': ['domain'], 'docs_url': 'https://www.whisper.security/docs/recipes/brand-protection'}, {'method': 'identify', 'keyless': True, 'mode': 'direct', 'summary': 'Name the vendor and operator role behind a host or IP in one call.', 'params': ['v'], 'docs_url': 'https://www.whisper.security/docs/whisper-graph/procedures/identify'}, {'method': 'assess', 'keyless': True, 'mode': 'direct', 'summary': 'Get a labelled threat posture for a host or IP - malicious, benign, or unknown.', 'params': ['v'], 'docs_url': 'https://www.whisper.security/docs/whisper-graph/procedures'}, {'method': 'variants', 'keyless': True, 'mode': 'direct', 'summary': 'Generate look-alike domain variants of a brand and see which are registered.', 'params': ['v'], 'docs_url': 'https://www.whisper.security/docs/whisper-graph/procedures/variants'}, {'method': 'walk', 'keyless': True, 'mode': 'direct', 'summary': 'Walk the graph to the nearest known vendors behind a host, with the channel and confidence.', 'params': ['v'], 'docs_url': 'https://www.whisper.security/docs/whisper-graph/procedures'}, {'method': 'explain', 'keyless': True, 'mode': 'direct', 'summary': 'Score an indicator against the threat feeds and explain exactly why.', 'params': ['v'], 'docs_url': 'https://www.whisper.security/docs/whisper-graph/procedures/explain'}, {'method': 'pslTldplusone', 'keyless': True, 'mode': 'direct', 'summary': 'Reduce any hostname to its registrable apex (eTLD+1) via the Public Suffix List.', 'params': ['v'], 'docs_url': 'https://www.whisper.security/docs/whisper-graph/procedures/helpers'}, {'method': 'pslAffiliation', 'keyless': True, 'mode': 'direct', 'summary': 'Check whether a domain is a PSL private-section suffix and who submitted it.', 'params': ['v'], 'docs_url': 'https://www.whisper.security/docs/whisper-graph/procedures/helpers'}, {'method': 'origins', 'keyless': True, 'mode': 'direct', 'summary': 'Find the real origin IPs behind a CDN-fronted domain, ranked by confidence.', 'params': ['v'], 'docs_url': 'https://www.whisper.security/docs/whisper-graph/procedures/origins'}, {'method': 'history', 'keyless': True, 'mode': 'direct', 'summary': 'Get the full historical WHOIS timeline for a domain.', 'params': ['v'], 'docs_url': 'https://www.whisper.security/docs/whisper-graph/procedures/history'}, {'method': 'historyWhois', 'keyless': True, 'mode': 'direct', 'summary': 'Get the WHOIS-only historical timeline for a domain.', 'params': ['v'], 'docs_url': 'https://www.whisper.security/docs/whisper-graph/procedures/history'}, {'method': 'asset', 'keyless': True, 'mode': 'direct', 'summary': 'List the member ASNs of an AS-SET macro.', 'params': ['v'], 'docs_url': 'https://www.whisper.security/docs/whisper-graph/procedures'}, {'method': 'lookupTorRelay', 'keyless': True, 'mode': 'direct', 'summary': 'Check whether an IP is a known Tor exit relay.', 'params': ['v'], 'docs_url': 'https://www.whisper.security/docs/whisper-graph/procedures/helpers'}, {'method': 'dbSchema', 'keyless': True, 'mode': 'direct', 'summary': 'List every node and relationship type in the graph with counts and examples.', 'params': [], 'docs_url': 'https://www.whisper.security/docs/whisper-graph/schema'}, {'method': 'submit', 'keyless': False, 'mode': 'direct', 'summary': 'Contribute an indicator observation or feedback back into the graph (requires an API key).', 'params': ['kind', 'identifier_kind', 'value', 'observation_id', 'confidence', 'first_seen', 'provenance', 'query', 'results', 'comment', 'severity', 'v'], 'docs_url': 'https://www.whisper.security/docs/cypher-api'}]

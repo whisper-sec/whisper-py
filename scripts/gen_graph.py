@@ -105,7 +105,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from . import WhisperError, __version__, _api_key, _control_url, _http_post, _problem_detail, _records
+from . import WhisperError, __version__, _api_key, _api_key_optional, _control_url, _http_post, _problem_detail, _records
 
 import json
 import os
@@ -210,11 +210,16 @@ def _graph_query(
 
 
 class Graph:
-    """A keyed client for the Whisper security graph (Cypher, so a key is required).
+    """A client for the Whisper security graph (Cypher). Two-tier, both honest:
 
-    The key is resolved lazily through the shared ``_api_key`` gate, so a missing key
-    raises the same helpful ``WhisperError`` as the rest of the control plane, at call
-    time. Pass it explicitly (``Graph("whisper_live_...")``) or set ``WHISPER_API_KEY``.
+    * the direct **read** verbs (assess, identify, explain, variants, walk, origins,
+      history, ...) run **keyless** -- no key, rate-limited (~100/window), real answers;
+    * raw ``query`` Cypher, the multi-step ``run_flow`` flows, and ``submit`` are
+      **keyed** -- pass a key (``Graph("whisper_live_...")``) or set ``WHISPER_API_KEY``.
+
+    A key is optional on the read verbs (it lifts the rate limit) and required on the
+    keyed ones (a missing key raises a helpful ``WhisperError`` at call time). Discover
+    the whole catalog with :meth:`recipes`.
     """
 
     def __init__(self, api_key: Optional[str] = None, *, timeout: int = 60) -> None:
@@ -222,7 +227,21 @@ class Graph:
         self._timeout = timeout
 
     def _q(self, cypher: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        # KEYED: raises a helpful error if no key is set.
         return _graph_query(cypher, params, api_key=_api_key(self._api_key), timeout=self._timeout)
+
+    def _q_keyless(self, cypher: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+        # KEYLESS taste: sends the key iff there is one (unlimited), else no header
+        # (rate-limited ~100/window). Never raises for a missing key. (Postel: liberal in.)
+        return _graph_query(cypher, params, api_key=_api_key_optional(self._api_key), timeout=self._timeout)
+
+    def recipes(self) -> List[Dict[str, Any]]:
+        """Discover the whole catalog: every graph method here -- its name, whether it is
+        ``keyless``, its ``mode`` (direct read / multi-step flow), a one-line ``summary``,
+        its ``params``, and its ``docs_url``. No key, no network (baked from the Whisper
+        query catalog). Call any by name, or a flow by slug via :meth:`run_flow`.
+        """
+        return [dict(r) for r in _RECIPES]
 
     def query(self, cypher: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         """Run any read Cypher directly (the raw escape hatch), keyed like every verb.
@@ -330,10 +349,16 @@ def _emit_method(m: dict, docs_base: str) -> str:
         sig_parts.append(_sig_param(p))
 
     if mode == "direct":
+        keyless = not m.get("requiresKey", True)
         sig = ", ".join(sig_parts)
         lines = [f"    def {name}({sig}) -> List[Dict[str, Any]]:"]
         doc = [f'        """{summary}', ""]
-        doc.append("        Direct Cypher against the keyed graph (an API key is required).")
+        if keyless:
+            doc.append("        Keyless direct read: runs with NO key as a rate-limited taste")
+            doc.append("        (~100/window, real answers); pass a key (or set WHISPER_API_KEY)")
+            doc.append("        to lift the limit.")
+        else:
+            doc.append("        Direct Cypher against the graph; an API key is required.")
         doc.append(f"        Columns: {cols}.")
         doc.append("")
         doc.append(f"        See: {docs_url}")
@@ -345,7 +370,8 @@ def _emit_method(m: dict, docs_base: str) -> str:
             argmap = "_drop_none({" + pairs + "})"
         else:
             argmap = "{}"
-        lines.append(f"        return self._q({cypher!r}, {argmap})")
+        call = "self._q_keyless" if keyless else "self._q"
+        lines.append(f"        return {call}({cypher!r}, {argmap})")
     else:  # flow: runs keyed via the gallery flow runner (SSE)
         slug = _slug(m)
         sig_parts.append("params: Optional[Dict[str, Any]] = None")
@@ -386,6 +412,22 @@ def main() -> None:
     for m in methods:
         body.append("")
         body.append(_emit_method(m, docs_base))
+    body.append("")
+
+    # Baked catalog for keyless, no-network discovery via Graph.recipes().
+    recipes = [
+        {
+            "method": m["method"],
+            "keyless": not m.get("requiresKey", True),
+            "mode": m["mode"],
+            "summary": _sanitize(m.get("summary") or ""),
+            "params": [p["name"] for p in (m.get("params") or [])],
+            "docs_url": _docs_url(m, docs_base),
+        }
+        for m in methods
+    ]
+    body.append("")
+    body.append("_RECIPES = " + repr(recipes))
     body.append("")
 
     out = os.path.join(repo, "whisper_id", "graph.py")

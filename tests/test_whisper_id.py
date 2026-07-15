@@ -440,10 +440,58 @@ def test_graph_db_schema_sends_empty_parameters(monkeypatch):
     assert seen["parameters"] == {}
 
 
-def test_graph_no_key_raises_shared_error(monkeypatch):
+def test_graph_keyless_read_needs_no_key(monkeypatch):
+    # Two-tier: the direct read verbs run keyless. With no key set they must NOT raise;
+    # they resolve an EMPTY api_key so _http_post omits the X-API-Key header downstream.
+    monkeypatch.delenv("WHISPER_API_KEY", raising=False)
+    seen = _gpost(monkeypatch, 200, json.dumps({
+        "columns": ["host"], "rows": [{"host": "api.openai.com"}]}))
+    out = Graph().identify("api.openai.com")
+    assert out == [{"host": "api.openai.com"}]
+    assert seen["api_key"] == ""  # keyless taste: no key resolved, header omitted
+
+
+def test_graph_keyed_verbs_without_key_raise(monkeypatch):
+    # Raw Cypher, the multi-step flows, and submit are keyed: no key -> helpful raise.
     monkeypatch.delenv("WHISPER_API_KEY", raising=False)
     with pytest.raises(WhisperError, match="no API key"):
-        Graph().identify("api.openai.com")
+        Graph().query("CALL db.schema()")
+
+
+def test_http_post_omits_key_header_when_empty(monkeypatch):
+    # Transport contract: an empty api_key sends NO X-API-Key header (the keyless taste),
+    # a present key sends it. Assert against the actual urllib Request headers.
+    captured = {}
+
+    class _Resp:
+        status = 200
+        def read(self):
+            return b'{"columns":[],"rows":[]}'
+        def __enter__(self):
+            return self
+        def __exit__(self, *a):
+            return False
+
+    def fake_urlopen(req, timeout=None):
+        captured["headers"] = dict(req.headers)
+        return _Resp()
+
+    monkeypatch.setattr(whisper_id.urllib.request, "urlopen", fake_urlopen)
+    whisper_id._http_post("https://graph.whisper.security/api/query", b"{}", api_key="", timeout=5)
+    assert "X-api-key" not in captured["headers"]  # urllib title-cases header keys
+    whisper_id._http_post("https://graph.whisper.security/api/query", b"{}", api_key="whisper_live_K", timeout=5)
+    assert captured["headers"].get("X-api-key") == "whisper_live_K"
+
+
+def test_graph_recipes_discovery(monkeypatch):
+    # recipes() is keyless, no-network catalog discovery: 29 entries with the two-tier flag.
+    monkeypatch.delenv("WHISPER_API_KEY", raising=False)
+    recs = Graph().recipes()
+    assert len(recs) == 29
+    by = {r["method"]: r for r in recs}
+    assert by["assess"]["keyless"] is True and by["assess"]["mode"] == "direct"
+    assert by["typosquat"]["keyless"] is False and by["typosquat"]["mode"] == "flow"
+    assert all(r["docs_url"].startswith("https://www.whisper.security/docs") for r in recs)
 
 
 def test_graph_explicit_key_used(monkeypatch):

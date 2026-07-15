@@ -49,12 +49,12 @@ __all__ = [
     "Egress",
     "WhisperError",
     "cli_path",
-    # Keyed graph namespace (Cypher, so a key is required) - the security graph.
+    # The security graph (Cypher): read verbs keyless, raw Cypher + flows + submit keyed.
     "Graph",
     "graph",
     "__version__",
 ]
-__version__ = "0.5.1"
+__version__ = "0.6.0"
 
 # The publicly-announced Whisper agent prefix (AS219419), used to liberally recover a
 # /128 from any control-plane envelope shape (Postel: be liberal in what we accept).
@@ -364,20 +364,18 @@ def _http_post(url: str, payload: bytes, *, api_key: str, timeout: int) -> tuple
     """POST a JSON control query; return ``(status, body)``.
 
     The key travels ONLY in the ``X-API-Key`` header: never the body, never the URL, never
-    a log line. A 4xx/5xx still carries a decodable problem body, so we read it (rather than
-    raising) and let the caller surface the server's ``detail``.
+    a log line. An **empty** ``api_key`` sends NO header at all -- that is the keyless taste
+    of the graph's direct read procedures (rate-limited). A 4xx/5xx still carries a decodable
+    problem body, so we read it (rather than raising) and let the caller surface ``detail``.
     """
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-            "X-API-Key": api_key,
-            "User-Agent": f"whisper-id-py/{__version__}",
-        },
-    )
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "User-Agent": f"whisper-id-py/{__version__}",
+    }
+    if api_key:
+        headers["X-API-Key"] = api_key  # present => keyed (unlimited); absent => keyless taste
+    req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:  # noqa: S310 (https, our endpoint)
             return resp.status, resp.read()
@@ -459,9 +457,17 @@ def _api_key(key: Optional[str]) -> str:
         raise WhisperError(
             "no API key: pass key='whisper_live_...' or set WHISPER_API_KEY. The control-plane "
             "calls (list_agents/policy/logs/revoke/identity/agent) act on your own tenant and "
-            "need your key; the keyless calls (verify/rdap) do not."
+            "need your key; the keyless calls (verify/rdap and the graph's direct read "
+            "procedures) do not."
         )
     return resolved
+
+
+def _api_key_optional(key: Optional[str]) -> str:
+    """Resolve the key if there is one, else ``""`` -- never raises. Used by the graph's
+    keyless direct read procedures: with a key they run unlimited, without one they run as
+    the rate-limited keyless taste. (Postel: liberal in what we accept.)"""
+    return (key or os.environ.get("WHISPER_API_KEY") or "").strip()
 
 
 def _control(op: str, args: Optional[dict] = None, *, key: Optional[str], timeout: int) -> list:
