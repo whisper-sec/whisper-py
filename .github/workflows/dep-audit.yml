@@ -1,0 +1,28 @@
+name: dep-audit
+
+# Continuous dependency-vulnerability audit.
+# Fails the build on any known advisory in the installed dependency closure.
+# Runs on every pull request and every push to the default branch, plus a
+# weekly off-peak sweep so a newly-disclosed advisory is caught even when no
+# new commit lands. Complements the pre-publish security review.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: "47 4 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  pip-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install pip-audit
+      - run: pip install '.[socks]'
+      - run: pip-audit
