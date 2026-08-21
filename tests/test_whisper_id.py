@@ -477,9 +477,9 @@ def test_http_post_omits_key_header_when_empty(monkeypatch):
         return _Resp()
 
     monkeypatch.setattr(whisper_id.urllib.request, "urlopen", fake_urlopen)
-    whisper_id._http_post("https://graph.whisper.security/api/query", b"{}", api_key="", timeout=5)
+    whisper_id._http_post("https://graph.whisper.online/api/query", b"{}", api_key="", timeout=5)
     assert "X-api-key" not in captured["headers"]  # urllib title-cases header keys
-    whisper_id._http_post("https://graph.whisper.security/api/query", b"{}", api_key="whisper_live_K", timeout=5)
+    whisper_id._http_post("https://graph.whisper.online/api/query", b"{}", api_key="whisper_live_K", timeout=5)
     assert captured["headers"].get("X-api-key") == "whisper_live_K"
 
 

@@ -89,7 +89,7 @@ control plane: the key travels ONLY in the ``X-API-Key`` header (via the shared
     g.typosquat("paypal.com")            # multi-step flow -> {steps, context, output}
     g.query("CALL db.schema()")          # raw escape hatch, any read Cypher
 
-``direct`` verbs POST their Cypher to ``graph.whisper.security/api/query`` and return a
+``direct`` verbs POST their Cypher to ``graph.whisper.online/api/query`` and return a
 list of column-keyed dicts. ``flow`` verbs are multi-step reads run by the gallery flow
 runner: one keyed POST to ``console.whisper.security/api/gallery/run``, consumed as a
 Server-Sent-Events stream. They return the flow result (``steps``, ``context``,

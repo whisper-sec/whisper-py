@@ -73,7 +73,7 @@ def _rdap_base() -> str:
 # HTTPS (stdlib urllib, no `whisper` CLI); the key travels ONLY in the X-API-Key header.
 # Overridable via $WHISPER_CONTROL_URL for self-host/pre-prod (Postel: liberal in, sane default).
 def _control_url() -> str:
-    return (os.environ.get("WHISPER_CONTROL_URL") or "https://graph.whisper.security/api/query").strip()
+    return (os.environ.get("WHISPER_CONTROL_URL") or "https://graph.whisper.online/api/query").strip()
 
 
 class WhisperError(RuntimeError):
@@ -317,7 +317,7 @@ def ip(*, timeout: int = 60) -> str:
 # everyone real value with no key; supply your ``whisper_live_`` key (arg or
 # ``WHISPER_API_KEY``) and these unlock the full control plane (Postel two-tier). Every
 # call is one HTTPS POST of the single verb ``CALL whisper.agents({op, args})`` to
-# ``graph.whisper.security``: stdlib ``urllib`` only, no extra dependencies.
+# ``graph.whisper.online``: stdlib ``urllib`` only, no extra dependencies.
 # ---------------------------------------------------------------------------------------
 
 def _escape_cypher(s: str) -> str:
