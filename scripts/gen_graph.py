@@ -75,8 +75,11 @@ HEADER = '''# SPDX-License-Identifier: MIT
 # Source of truth: the Whisper query catalog (sdk-methods.json / catalog.json).
 """The keyed Whisper graph namespace: one typed method per catalog query.
 
-Everything here is Cypher (or a flow of Cypher), and Cypher needs an API key (Kaveh's
-rule), so the whole namespace is KEYED. It reuses the exact keyed transport of the
+Everything here is Cypher (or a flow of Cypher). MOST OF IT ANSWERS WITH NO KEY:
+assess, identify, explain, history, variants, resolve, enrich, origins, quota and
+the rest of the read surface are served on the public keyless tier, and a key
+raises the budget and unlocks the write and control verbs rather than unlocking
+reading at all. It reuses the exact transport of the
 control plane: the key travels ONLY in the ``X-API-Key`` header (via the shared
 ``_api_key`` gate), never in the body or the URL. This is the same auth path as
 ``list_agents``/``policy``/``logs``; there is no second auth mechanism.

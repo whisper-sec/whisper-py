@@ -116,7 +116,7 @@ Every control call is one HTTPS `POST` of `CALL whisper.agents({op, args})`; it 
 For `register` / `egress` / `ip`, the `whisper` CLI on your `PATH` (this package is a thin, dependency-free wrapper over it). The graph read verbs and the keyless calls above need nothing.
 
 ```sh
-curl get.whisper.online | sh
+curl -fsSL https://get.whisper.online | sh
 ```
 
 Set `WHISPER_API_KEY` in the environment (or run `whisper login`) for the CLI-backed calls, the keyed graph (raw Cypher + flows + `submit`), and the control plane. The graph read verbs, `verify`, and `rdap` are keyless.

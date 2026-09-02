@@ -54,7 +54,7 @@ __all__ = [
     "graph",
     "__version__",
 ]
-__version__ = "0.6.0"
+__version__ = "0.6.1"
 
 # The publicly-announced Whisper agent prefix (AS219419), used to liberally recover a
 # /128 from any control-plane envelope shape (Postel: be liberal in what we accept).
@@ -609,8 +609,8 @@ def agent(agent_or_address: str, *, key: Optional[str] = None, timeout: int = 60
 # Keyed graph namespace - the Whisper security graph (Cypher). Imported last so the shared
 # keyed plumbing above (_http_post, _api_key, _control_url, _records, _problem_detail) is
 # already defined when graph.py binds to it. It is Cypher, and Cypher needs an API key, so
-# the whole namespace sits on the SAME keyed transport as the control plane - not the
-# keyless verify/rdap surface (Kaveh's rule: if it is Cypher, it needs a key).
+# the namespace shares the control plane's transport, but most verbs are readable
+# with no key at all; a key raises the budget and unlocks the write verbs.
 # ---------------------------------------------------------------------------------------
 from .graph import Graph  # noqa: E402  (deferred: needs the helpers defined above)
 
@@ -620,7 +620,8 @@ def graph(api_key: Optional[str] = None, *, timeout: int = 60) -> Graph:
 
     The key is resolved through the shared ``_api_key`` gate at call time (arg, or
     ``WHISPER_API_KEY``), exactly like the rest of the control plane. Cypher needs a key,
-    so every verb here is keyed; the keyless half of Whisper stays ``verify``/``rdap``.
+    most verbs here answer with NO key on the public tier; a key raises the budget
+    and unlocks the write and control verbs.
 
         from whisper_id import graph
         g = graph()                       # key from WHISPER_API_KEY (or graph('whisper_live_...'))
