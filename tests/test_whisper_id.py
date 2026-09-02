@@ -362,7 +362,7 @@ def test_non_json_reply_raises(monkeypatch):
         list_agents()
 
 
-# --- Keyed graph namespace (Cypher, so a key is required) -----------------------------
+# --- Graph namespace (Cypher; proxied up with a key or without) -----------------------
 
 import importlib  # noqa: E402
 
@@ -402,7 +402,7 @@ def test_graph_direct_emits_query_and_parameters(monkeypatch):
         "category, roles, host_class, band")
     assert seen["parameters"] == {"v": "api.openai.com"}
     assert seen["api_key"] == "whisper_live_TESTKEY"
-    assert seen["url"] == whisper_id._control_url()  # same keyed endpoint as the control plane
+    assert seen["url"] == whisper_id._control_url()  # same endpoint as the control plane
 
 
 def test_graph_object_rows_pass_through(monkeypatch):
@@ -451,11 +451,48 @@ def test_graph_keyless_read_needs_no_key(monkeypatch):
     assert seen["api_key"] == ""  # keyless taste: no key resolved, header omitted
 
 
-def test_graph_keyed_verbs_without_key_raise(monkeypatch):
-    # Raw Cypher, the multi-step flows, and submit are keyed: no key -> helpful raise.
+def test_flow_omits_api_key_header_when_keyless(monkeypatch):
+    # An EMPTY credential is not the same as NO credential: a server handed "" refuses
+    # instead of applying keyless policy. The flow transport must omit the header entirely.
+    # _sse_post is a generator, so it must be CONSUMED for the request to be built at all.
+    import urllib.request
+
+    class _Boom(Exception):
+        pass
+
+    cap = {}
+
+    def _fake(req, timeout=None):
+        cap["names"] = [n.lower() for n, _ in req.header_items()]
+        raise _Boom()
+
+    monkeypatch.setattr(urllib.request, "urlopen", _fake)
+    for key, expected in (("", False), ("whisper_live_K", True)):
+        cap.clear()
+        try:
+            list(graph_mod._sse_post("https://example.invalid/f", b"{}", api_key=key, timeout=5))
+        except _Boom:
+            pass
+        assert ("x-api-key" in cap["names"]) is expected, f"key={key!r}"
+
+
+def test_graph_never_gates_on_key_client_side(monkeypatch):
+    # Every graph verb proxies up with whatever key there is, or none: the graph owns the
+    # keyless policy. The SDK must NOT refuse the call on the caller's behalf. Raw Cypher
+    # was gated here once; that gate was self-inflicted friction and is gone. The control
+    # plane (whisper.agents) is the one surface that still requires a key.
     monkeypatch.delenv("WHISPER_API_KEY", raising=False)
-    with pytest.raises(WhisperError, match="no API key"):
-        Graph().query("CALL db.schema()")
+    seen = {}
+    monkeypatch.setattr(
+        graph_mod, "_http_post",
+        lambda url, payload, *, api_key, timeout: (
+            seen.update({"api_key": api_key}),
+            (200, b'{"columns":["x"],"rows":[{"x":1}]}'),
+        )[1],
+    )
+    out = Graph().query("CALL db.schema()")
+    assert out == [{"x": 1}]          # it was SENT, not refused
+    assert seen["api_key"] == ""      # and sent keyless, header omitted downstream
 
 
 def test_http_post_omits_key_header_when_empty(monkeypatch):
@@ -620,9 +657,11 @@ def test_graph_flow_non_json_event_tolerated(monkeypatch):
     assert out["steps"] == [{"raw": "not json"}]
 
 
-def test_graph_flow_no_key_raises_shared_error(monkeypatch):
+def test_graph_flow_without_key_is_decided_upstream(monkeypatch):
+    # A flow with no key is still SENT; the flow runner answers or refuses (401). The old
+    # client-side "no API key" raise is gone: the SDK does not adjudicate access.
     monkeypatch.delenv("WHISPER_API_KEY", raising=False)
-    with pytest.raises(WhisperError, match="no API key"):
+    with pytest.raises(WhisperError, match="401|status"):
         Graph().typosquat()
 
 
@@ -690,3 +729,54 @@ def test_graph_every_method_links_its_docs(name):
     # Every named verb carries its catalog docs link (docsBase + docPath).
     doc = getattr(Graph, name).__doc__ or ""
     assert "See: https://www.whisper.security/" in doc, name
+
+
+
+
+# --------------------------------------------------------------------------
+# The graph size this README states.
+#
+# The opening line is the first claim a reader meets on the package page, and
+# it once carried a figure roughly half the real one. Read the live totals from
+# https://nic.whisper.online/stats/data.json, which is keyless and public, and
+# round from those.
+#
+# The guard is a FLOOR rather than an exact match, and it is deliberately
+# offline: it cannot fail because a network is down, and it cannot go stale as
+# the graph grows. It fails only if the stated size drops far below what the
+# graph has already reached.
+# --------------------------------------------------------------------------
+
+_MIN_NODES_B = 7.0
+_MIN_EDGES_B = 39.0
+
+
+def _readme() -> str:
+    here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(here, "README.md"), encoding="utf-8") as fh:
+        return fh.read()
+
+
+def test_readme_states_the_graph_size_it_actually_has():
+    import re
+
+    body = _readme()
+    # The control: the file really was read, so an empty read cannot pass.
+    assert "Whisper security graph" in body
+
+    nodes = re.search(r"([\d.]+)B nodes", body)
+    # Liberal in the word: "edges" and "relationships" are the same quantity, and a
+    # guard that only knew one of them would read the other as "no figure at all".
+    edges = re.search(r"([\d.]+)B (?:edges|relationships)", body)
+    assert nodes, "the README no longer states a node count"
+    assert edges, "the README no longer states an edge count"
+    assert float(nodes.group(1)) >= _MIN_NODES_B, (
+        f"README states {nodes.group(1)}B nodes; the graph passed "
+        f"{_MIN_NODES_B}B. Read the live figure from "
+        "https://nic.whisper.online/stats/data.json."
+    )
+    assert float(edges.group(1)) >= _MIN_EDGES_B, (
+        f"README states {edges.group(1)}B edges; the graph passed "
+        f"{_MIN_EDGES_B}B. Read the live figure from "
+        "https://nic.whisper.online/stats/data.json."
+    )

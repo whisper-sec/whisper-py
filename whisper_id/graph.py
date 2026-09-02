@@ -4,16 +4,14 @@
 # GENERATED FILE - do not edit by hand.
 # Regenerate with: python scripts/gen_graph.py (from the whisper-py repo root).
 # Source of truth: the Whisper query catalog (sdk-methods.json / catalog.json).
-"""The keyed Whisper graph namespace: one typed method per catalog query.
+"""The Whisper graph namespace: one typed method per catalog query.
 
-Everything here is Cypher (or a flow of Cypher). MOST OF IT ANSWERS WITH NO KEY:
-assess, identify, explain, history, variants, resolve, enrich, origins, quota and
-the rest of the read surface are served on the public keyless tier, and a key
-raises the budget and unlocks the write and control verbs rather than unlocking
-reading at all. It reuses the exact transport of the
-control plane: the key travels ONLY in the ``X-API-Key`` header (via the shared
-``_api_key`` gate), never in the body or the URL. This is the same auth path as
-``list_agents``/``policy``/``logs``; there is no second auth mechanism.
+Thirteen direct read verbs answer with NO key on the public tier, rate-limited to
+roughly 100 calls an hour: identify, assess, variants, walk, explain,
+pslTldplusone, pslAffiliation, origins, history, historyWhois, asset,
+lookupTorRelay and dbSchema. Raw Cypher, the fifteen
+multi-step flows - which are reads, not writes - and submit, the one write channel,
+are proxied up the same way; the graph decides. A key buys reach and budget.
 
     from whisper_id import graph
 
@@ -25,7 +23,7 @@ control plane: the key travels ONLY in the ``X-API-Key`` header (via the shared
 
 ``direct`` verbs POST their Cypher to ``graph.whisper.online/api/query`` and return a
 list of column-keyed dicts. ``flow`` verbs are multi-step reads run by the gallery flow
-runner: one keyed POST to ``console.whisper.security/api/gallery/run``, consumed as a
+runner: one POST to ``console.whisper.security/api/gallery/run``, consumed as a
 Server-Sent-Events stream. They return the flow result (``steps``, ``context``,
 ``output``, ``totalLatencyMs``) and stream progress through ``on_event``;
 :meth:`Graph.run_flow` runs any flow by its catalog slug. Every method's docstring links
@@ -39,7 +37,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Dict, Iterator, List, Optional, Tuple
 
-from . import WhisperError, __version__, _api_key, _api_key_optional, _control_url, _http_post, _problem_detail, _records
+from . import WhisperError, __version__, _api_key_optional, _control_url, _http_post, _problem_detail, _records
 
 import json
 import os
@@ -68,17 +66,16 @@ def _sse_post(url: str, payload: bytes, *, api_key: str, timeout: int) -> Iterat
     comment lines, and a missing ``event:`` name (yielded as ``message`` per the SSE spec).
     A 4xx/5xx problem body raises :class:`WhisperError` carrying the server's ``detail``.
     """
-    req = urllib.request.Request(
-        url,
-        data=payload,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "text/event-stream",
-            "X-API-Key": api_key,
-            "User-Agent": f"whisper-id-py/{__version__}",
-        },
-    )
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "User-Agent": f"whisper-id-py/{__version__}",
+    }
+    if api_key:
+        # Present => keyed. ABSENT => keyless: an empty credential is not the same as no
+        # credential, and a server handed "" refuses instead of applying keyless policy.
+        headers["X-API-Key"] = api_key
+    req = urllib.request.Request(url, data=payload, method="POST", headers=headers)
     try:
         resp = urllib.request.urlopen(req, timeout=timeout)  # noqa: S310 (https, our endpoint)
     except urllib.error.HTTPError as exc:
@@ -115,7 +112,7 @@ def _graph_query(
     api_key: str,
     timeout: int,
 ) -> List[Dict[str, Any]]:
-    """POST one read Cypher to the keyed graph endpoint and return column-keyed dicts.
+    """POST one read Cypher to the graph endpoint and return column-keyed dicts.
 
     Conservative-emit: sends exactly ``{"query": cypher, "parameters": params or {}}``.
     Liberal-accept: reads the ``{columns, rows, statistics}`` envelope, passes object
@@ -144,16 +141,18 @@ def _graph_query(
 
 
 class Graph:
-    """A client for the Whisper security graph (Cypher). Two-tier, both honest:
+    """A client for the Whisper security graph (Cypher).
 
-    * the direct **read** verbs (assess, identify, explain, variants, walk, origins,
-      history, ...) run **keyless** -- no key, rate-limited (~100/window), real answers;
-    * raw ``query`` Cypher, the multi-step ``run_flow`` flows, and ``submit`` are
-      **keyed** -- pass a key (``Graph("whisper_live_...")``) or set ``WHISPER_API_KEY``.
+    Every verb here is proxied to the graph, with a key if you have one and without if
+    you do not. The SDK does not decide what you may call: the graph owns the keyless
+    policy and answers or refuses accordingly. In practice the direct read verbs (assess,
+    identify, explain, variants, walk, origins, history, ...) answer keyless and
+    rate-limited, and a key lifts that limit; each entry's ``keyless`` flag in
+    :meth:`recipes` records what the catalog declares. Pass a key as
+    ``Graph("whisper_live_...")`` or set ``WHISPER_API_KEY``.
 
-    A key is optional on the read verbs (it lifts the rate limit) and required on the
-    keyed ones (a missing key raises a helpful ``WhisperError`` at call time). Discover
-    the whole catalog with :meth:`recipes`.
+    Note this is the graph namespace only. The control plane (``whisper.agents``: your
+    agents, policy, logs, identity) is a different surface and always needs your key.
     """
 
     def __init__(self, api_key: Optional[str] = None, *, timeout: int = 60) -> None:
@@ -161,8 +160,8 @@ class Graph:
         self._timeout = timeout
 
     def _q(self, cypher: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        # KEYED: raises a helpful error if no key is set.
-        return _graph_query(cypher, params, api_key=_api_key(self._api_key), timeout=self._timeout)
+        # Proxied upstream with whatever key is set; the graph decides what to answer.
+        return _graph_query(cypher, params, api_key=_api_key_optional(self._api_key), timeout=self._timeout)
 
     def _q_keyless(self, cypher: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
         # KEYLESS taste: sends the key iff there is one (unlimited), else no header
@@ -178,7 +177,7 @@ class Graph:
         return [dict(r) for r in _RECIPES]
 
     def query(self, cypher: str, params: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
-        """Run any read Cypher directly (the raw escape hatch), keyed like every verb.
+        """Run any read Cypher directly (the raw escape hatch), sent like every verb.
 
         ``params`` are sent as the server-side ``$parameters`` map. Returns a list of
         column-keyed dicts. This is the general form the typed verbs below specialise.
@@ -195,7 +194,7 @@ class Graph:
         *,
         on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None,
     ) -> Dict[str, Any]:
-        """Run any catalog flow by its slug via the gallery flow runner (keyed, SSE).
+        """Run any catalog flow by its slug via the gallery flow runner (SSE).
 
         POSTs ``{"slug", "value", "paramValues"}`` to the flow-run endpoint and consumes the
         Server-Sent-Events stream: per-step tables accumulate under ``steps``, the final
@@ -241,7 +240,7 @@ class Graph:
         result: Dict[str, Any] = {
             "slug": slug, "steps": [], "context": {}, "output": None, "totalLatencyMs": None,
         }
-        events = _sse_post(_flow_run_url(), payload, api_key=_api_key(self._api_key), timeout=self._timeout)
+        events = _sse_post(_flow_run_url(), payload, api_key=_api_key_optional(self._api_key), timeout=self._timeout)
         for name, data in events:
             try:
                 event = json.loads(data) if data else {}
@@ -268,7 +267,7 @@ class Graph:
     def anycastDnsRootSovereignty(self, country: str = 'BR', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Assess how resilient a country's core DNS is if it were cut off from the world.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'anycast-dns-root-sovereignty', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: distinctLetters, totalInstances, globalCount, localCount, hostingAsns.
@@ -280,7 +279,7 @@ class Graph:
     def attackPath(self, value: str = 'paypal.com', other: str = 'paypa1.com', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Find the choke points an attacker would target - and how any two things connect.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'attack-path', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: indicator, type, available, cached, found, score, level, explanation, factors, sources, advisory.
@@ -292,7 +291,7 @@ class Graph:
     def attackSurface(self, domain: str = 'github.com', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Map everything about a domain that's exposed to the outside world, scored for risk.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'attack-surface', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: indicator, type, available, cached, found, score, level, explanation, factors, sources, advisory.
@@ -304,7 +303,7 @@ class Graph:
     def bgpHijackExposure(self, value: str = 'AS13335', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Grade a network's routing security and trace conflicts to the domains they'd expose.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'bgp-hijack-exposure', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: prefix, is_moas, conflicting_asn.
@@ -316,7 +315,7 @@ class Graph:
     def blastRadius(self, indicator: str = 'ns1.dreamhost.com', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Pick one asset and see what would break if it failed - and what it depends on in turn.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'blast-radius', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: labels, name.
@@ -328,7 +327,7 @@ class Graph:
     def buildTakedownEvidencePackage(self, domain: str = 'ickaoex.com', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Assemble a ready-to-submit dossier for taking down a scam or phishing domain.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'build-takedown-evidence-package', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: indicator, type, available, cached, found, score, level, explanation, factors, sources, advisory.
@@ -340,7 +339,7 @@ class Graph:
     def discoverAiAgentInfrastructure(self, value: str = 'github.com', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Map an organisation's externally visible AI and agent endpoints from the outside.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'discover-ai-agent-infrastructure', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: hostname, ips.
@@ -352,7 +351,7 @@ class Graph:
     def indicator(self, indicator: str = 'theblackservicenetwork.com', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Investigate one suspicious domain, IP, or network in depth and get a clear picture of the threat and everything connected to it.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'indicator', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: host, label, band, sub_labels, coverage, evidence.
@@ -364,7 +363,7 @@ class Graph:
     def indicatorEnrichment(self, value: str = 'google.com', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Turn one domain or IP into a full context card - owner, hosting, mail, location, reputation at a glance.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'indicator-enrichment', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: attribute, value.
@@ -376,7 +375,7 @@ class Graph:
     def infrastructureMapping(self, value: str = 'cloudflare.com', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Trace one indicator to its true owner and full estate, even behind privacy screens and CDNs.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'infrastructure-mapping', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: canonical_name, vendor_id, category, roles, host_class.
@@ -388,7 +387,7 @@ class Graph:
     def mapSupplyChainConcentration(self, domain: str = 'atlassian.com', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Grade an organisation for over-reliance on single providers, regions, or facilities.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'map-supply-chain-concentration', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: provider, asn, region, country.
@@ -400,7 +399,7 @@ class Graph:
     def nameserverHijackDnsConsistency(self, value: str = 'google.com', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Check a domain's name servers for the misconfigurations that enable DNS hijacking.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'nameserver-hijack-dns-consistency', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: nameserver, ips, status.
@@ -412,7 +411,7 @@ class Graph:
     def routeHealth(self, target: str = '1.1.1.0/24', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Profile a network or address block into a full routing and reachability health card.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'route-health', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: prefix, multi_origin, anycast, withdrawn.
@@ -424,7 +423,7 @@ class Graph:
     def subdomainTakeover(self, value: str = 'github.com', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Find subdomains that point at abandoned services an attacker could claim.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'subdomain-takeover', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: subdomain, ips.
@@ -436,7 +435,7 @@ class Graph:
     def typosquat(self, domain: str = 'paypal.com', params: Optional[Dict[str, Any]] = None, on_event: Optional[Callable[[str, Dict[str, Any]], None]] = None) -> Dict[str, Any]:
         """Find registered look-alikes of your brand and check which ones are dangerous.
 
-        Multi-step flow, run keyed via the gallery flow runner (SSE): POSTs
+        Multi-step flow, run on the gallery flow runner (SSE): POSTs
         {slug: 'typosquat', value, paramValues} and consumes the event stream. Returns
         {slug, steps, context, output, totalLatencyMs}; on_event streams progress.
         Anchor columns: variant, method, confidence.
@@ -604,7 +603,7 @@ class Graph:
     def submit(self, kind: str = 'indicator', identifier_kind: str = 'ip', value: str = '203.0.113.5', observation_id: Optional[str] = None, confidence: Optional[float] = None, first_seen: Optional[str] = None, provenance: Optional[str] = None, query: Optional[str] = None, results: Optional[Any] = None, comment: Optional[str] = None, severity: Optional[str] = None, v: Optional[float] = None) -> List[Dict[str, Any]]:
         """Contribute an indicator observation or feedback back into the graph (requires an API key).
 
-        Direct Cypher against the graph; an API key is required.
+        Direct Cypher against the graph; sent with a key or without.
         Columns: observation_id, kind, accepted, idempotent, promotion_state, k_bucket, advisory, v.
 
         See: https://www.whisper.security/docs/cypher-api

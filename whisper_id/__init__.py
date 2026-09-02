@@ -13,7 +13,7 @@ you a Pythonic ``register()`` / ``egress()`` / ``verify()`` / ``ip()`` surface o
         import requests
         requests.get("https://api64.ipify.org").text   # leaves from your Whisper IPv6
 
-Requires the ``whisper`` CLI on PATH (``curl get.whisper.online | sh``) and, for the
+Requires the ``whisper`` CLI on PATH (``curl -fsSL https://get.whisper.online | sh``) and, for the
 authenticated calls, ``WHISPER_API_KEY`` in the environment (or a logged-in CLI).
 """
 from __future__ import annotations
@@ -49,12 +49,12 @@ __all__ = [
     "Egress",
     "WhisperError",
     "cli_path",
-    # The security graph (Cypher): read verbs keyless, raw Cypher + flows + submit keyed.
+    # The security graph (Cypher): every verb is proxied up, with a key or without.
     "Graph",
     "graph",
     "__version__",
 ]
-__version__ = "0.6.1"
+__version__ = "0.7.0"
 
 # The publicly-announced Whisper agent prefix (AS219419), used to liberally recover a
 # /128 from any control-plane envelope shape (Postel: be liberal in what we accept).
@@ -116,7 +116,7 @@ def cli_path() -> str:
     if not found:
         raise WhisperError(
             "the `whisper` CLI was not found on PATH. Install it with "
-            "`curl get.whisper.online | sh` (see https://whisper.online)."
+            "`curl -fsSL https://get.whisper.online | sh` (see https://whisper.online)."
         )
     return found
 
@@ -456,17 +456,18 @@ def _api_key(key: Optional[str]) -> str:
     if not resolved:
         raise WhisperError(
             "no API key: pass key='whisper_live_...' or set WHISPER_API_KEY. The control-plane "
-            "calls (list_agents/policy/logs/revoke/identity/agent) act on your own tenant and "
-            "need your key; the keyless calls (verify/rdap and the graph's direct read "
-            "procedures) do not."
+            "calls (list_agents/policy/logs/revoke/identity/agent) act on your own tenant, so "
+            "they always need your key. Graph calls do not go through this gate at all -- they "
+            "are proxied upstream and the graph decides what to answer."
         )
     return resolved
 
 
 def _api_key_optional(key: Optional[str]) -> str:
-    """Resolve the key if there is one, else ``""`` -- never raises. Used by the graph's
-    keyless direct read procedures: with a key they run unlimited, without one they run as
-    the rate-limited keyless taste. (Postel: liberal in what we accept.)"""
+    """Resolve the key if there is one, else ``""`` -- never raises. Used by every graph
+    verb. We do not adjudicate access here: the call is proxied upstream with whatever key
+    was resolved, and the graph decides whether to answer it. (Postel: liberal in what we
+    accept; the SDK adds no resistance the server did not ask for.)"""
     return (key or os.environ.get("WHISPER_API_KEY") or "").strip()
 
 
@@ -606,22 +607,23 @@ def agent(agent_or_address: str, *, key: Optional[str] = None, timeout: int = 60
 
 
 # ---------------------------------------------------------------------------------------
-# Keyed graph namespace - the Whisper security graph (Cypher). Imported last so the shared
-# keyed plumbing above (_http_post, _api_key, _control_url, _records, _problem_detail) is
-# already defined when graph.py binds to it. It is Cypher, and Cypher needs an API key, so
-# the namespace shares the control plane's transport, but most verbs are readable
-# with no key at all; a key raises the budget and unlocks the write verbs.
+# ---------------------------------------------------------------------------------------
+# The Whisper graph namespace (Cypher). Imported last so the shared plumbing above
+# (_http_post, _api_key_optional, _control_url, _records, _problem_detail) is already
+# defined when graph.py binds to it. Graph verbs are proxied with whatever key is set,
+# or none, and the graph decides what to answer. Only whisper.agents always needs a key.
 # ---------------------------------------------------------------------------------------
 from .graph import Graph  # noqa: E402  (deferred: needs the helpers defined above)
 
 
 def graph(api_key: Optional[str] = None, *, timeout: int = 60) -> Graph:
-    """Open the keyed Whisper security graph (functional-style factory for :class:`Graph`).
+    """Open the Whisper security graph (functional-style factory for :class:`Graph`).
 
-    The key is resolved through the shared ``_api_key`` gate at call time (arg, or
-    ``WHISPER_API_KEY``), exactly like the rest of the control plane. Cypher needs a key,
-    most verbs here answer with NO key on the public tier; a key raises the budget
-    and unlocks the write and control verbs.
+    A key is OPTIONAL on every verb. They all resolve it through ``_api_key_optional``,
+    which returns an empty string when none is set, and the call is proxied upstream
+    either way: the graph owns the keyless policy and answers or refuses. A key lifts
+    the keyless rate limit. The control plane (``whisper.agents``) is separate and
+    always requires one.
 
         from whisper_id import graph
         g = graph()                       # key from WHISPER_API_KEY (or graph('whisper_live_...'))

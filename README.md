@@ -1,6 +1,6 @@
 # whisper-id
 
-Three things for any Python agent, in one dependency-free package: query the **Whisper security graph** (billions of nodes joining the physical, network, naming, ownership and threat layers; live totals at nic.whisper.online/stats, Cypher), give the agent a routable **IPv6 identity** with safe **egress**, and drive the full **control plane**.
+Three things for any Python agent, in one dependency-free package: query the **Whisper security graph** (7.48B nodes and 39.5B edges joining the physical, network, naming, ownership and threat layers; live totals at nic.whisper.online/stats, Cypher), give the agent a routable **IPv6 identity** with safe **egress**, and drive the full **control plane**.
 
 ```sh
 pip install whisper-id            # add [socks] for requests+SOCKS: pip install "whisper-id[socks]"
@@ -8,7 +8,7 @@ pip install whisper-id            # add [socks] for requests+SOCKS: pip install 
 
 ## The security graph (keyless, zero setup)
 
-The Whisper graph knows who operates a host, its threat posture, its look-alikes, the real origins behind a CDN, WHOIS history, and 20+ named investigations. The **direct read verbs run with no key at all** (rate-limited taste, ~100/window). One import, real answers:
+The Whisper graph knows who operates a host, its threat posture, its look-alikes, the real origins behind a CDN, WHOIS history, and 15 named investigations. The **direct read verbs run with no key at all** (rate-limited taste, ~100/window). One import, real answers:
 
 ```python
 from whisper_id import graph
@@ -21,10 +21,10 @@ g.origins("cloudflare.com")                  # the real origin IPs behind a CDN
 g.explain("paypal.com")                      # threat-feed score + why
 ```
 
-Set `WHISPER_API_KEY` (or `graph("whisper_live_...")`) to lift the rate limit and unlock **raw Cypher** and the **multi-step flows**:
+Set `WHISPER_API_KEY` (or `graph("whisper_live_...")`) to lift the keyless rate limit. Every verb is sent either way; the graph decides what to answer:
 
 ```python
-g = graph("whisper_live_...")                # keyed: unlimited + flows + raw Cypher
+g = graph("whisper_live_...")                # with a key: the keyless rate limit is lifted
 
 # raw Cypher, your own query, parameters bound as $-params (never string-built):
 g.query("MATCH (h:HOSTNAME {name:$n})-[:RESOLVES_TO]->(ip) RETURN ip.name AS ip LIMIT 5", {"n": "github.com"})
@@ -38,7 +38,7 @@ for r in g.recipes():
     print(r["method"], "keyless" if r["keyless"] else "keyed", r["docs_url"])
 ```
 
-Every verb maps to a catalog entry with its own docs page under [whisper.security/docs](https://www.whisper.security/docs) (e.g. [`assess`](https://www.whisper.security/docs/whisper-graph/procedures/assess), [`identify`](https://www.whisper.security/docs/whisper-graph/procedures/identify)); `recipes()` carries the exact `docs_url` for each. The 13 direct reads are keyless; the 15 multi-step flows and the `submit` write channel are keyed. Full query reference: [whisper-catalog](https://github.com/whisper-sec/whisper-catalog).
+Every verb maps to a catalog entry with its own docs page under [whisper.security/docs](https://www.whisper.security/docs) (e.g. [`assess`](https://www.whisper.security/docs/whisper-graph/procedures), [`identify`](https://www.whisper.security/docs/whisper-graph/procedures/identify)); `recipes()` carries the exact `docs_url` for each. The 13 direct reads answer keyless; the 15 multi-step flows and the `submit` write channel are proxied up the same way and the graph decides. Full query reference: [whisper-catalog](https://github.com/whisper-sec/whisper-catalog).
 
 ## Identity + egress
 
@@ -62,7 +62,7 @@ with egress(set_env=False) as e:
 
 | Call | Does |
 |------|------|
-| `graph(key=None)` | The security-graph namespace. Read verbs (`assess`, `identify`, `explain`, `variants`, `walk`, `origins`, `history`, ...) are **keyless** (rate-limited); `query` (raw Cypher), the flows, and `submit` need a key. `recipes()` lists the whole catalog. |
+| `graph(key=None)` | The security-graph namespace. Every verb is proxied to the graph with a key or without; the graph decides what to answer. Read verbs (`assess`, `identify`, `explain`, `variants`, `walk`, `origins`, `history`, ...) answer **keyless** (rate-limited), and a key lifts the limit. `recipes()` lists the whole catalog. |
 | `register(name, *, new_key=False)` | Create a named agent: a routable `/128`. `new_key=True` mints a new agent **and** its own API key. -> `Agent(address, id, name)` |
 | `egress(agent=None, *, tier="socks5", set_env=True)` | Context manager: bring up egress bound to your `/128`. Yields `Egress` (`.port`, `.proxy_url`, `.socks_url`, `.proxies`). `tier="wireguard"` for a routed `/128`. |
 | `verify(address)` | Keyless: is `address` a real Whisper agent? (DANE + DNSSEC + reverse-DNS + JWS) -> `bool` |
@@ -119,7 +119,7 @@ For `register` / `egress` / `ip`, the `whisper` CLI on your `PATH` (this package
 curl -fsSL https://get.whisper.online | sh
 ```
 
-Set `WHISPER_API_KEY` in the environment (or run `whisper login`) for the CLI-backed calls, the keyed graph (raw Cypher + flows + `submit`), and the control plane. The graph read verbs, `verify`, and `rdap` are keyless.
+Set `WHISPER_API_KEY` in the environment (or run `whisper login`) for the CLI-backed calls and the control plane (`whisper.agents`), which always needs it. Graph calls never require a key from this SDK: they are proxied to the graph with one or without, and the graph decides what to answer. A key lifts the keyless rate limit. `verify` and `rdap` are keyless too.
 
 ## Links
 
