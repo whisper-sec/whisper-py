@@ -109,7 +109,7 @@ logs(agent=a["address"], kind="dns", from_="-1h")  # recent activity
 revoke(a["address"])                               # irreversible
 ```
 
-Every control call is one HTTPS `POST` of `CALL whisper.agents({op, args})`; it raises `WhisperError` with the server's message on failure. Set `WHISPER_CONTROL_URL` / `WHISPER_RDAP_URL` / `WHISPER_FLOW_RUN_URL` to point at a self-hosted deployment.
+Every control call is one HTTPS `POST` of `CALL whisper.agents({op, args})`; it raises `WhisperError` with the server's message on failure, with the server's `code`, `status` and `retryable` on it. A `revoke` that matches nothing of yours (revoked already, or not in your account) raises `NotFoundError` (`code` `NOT_FOUND`, `status` 404, not retryable): nothing was revoked, so do not retry it. Set `WHISPER_CONTROL_URL` / `WHISPER_RDAP_URL` / `WHISPER_FLOW_RUN_URL` to point at a self-hosted deployment.
 
 ## Requirements
 

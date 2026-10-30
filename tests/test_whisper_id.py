@@ -6,12 +6,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from types import SimpleNamespace
 
 import pytest
 
 import whisper_id
-from whisper_id import Agent, WhisperError, egress, ip, register, verify
+from whisper_id import Agent, WhisperError, egress, ip, register
 
 
 def _proc(stdout="", stderr="", code=0):
@@ -283,6 +282,78 @@ def test_revoke_sends_agent(monkeypatch):
         "ok": True, "result": {"columns": ["status"], "rows": [["revoked"]]}}))
     assert revoke("ag_123") == {"status": "revoked"}
     assert seen["query"] == "CALL whisper.agents({op:'revoke', args:{agent:'ag_123'}})"
+
+
+# Nothing revoked: the plane says it two ways, and both must raise NotFoundError
+# with the server's own message. Never a bare 404, never a success.
+_NOT_FOUND_ERR = {"code": "NOT_FOUND", "message": "nothing was revoked: no agent of yours matches 'ag_gone'",
+                  "retryable": False}
+_ROW_COLS = ["op", "ok", "status", "result", "error", "retry_after", "elapsed_ms"]
+
+
+@pytest.mark.parametrize("http_status,body", [
+    # The front door: HTTP 200, the 404 inside the 7-column row (object row).
+    (200, {"columns": _ROW_COLS, "rows": [{"op": "revoke", "ok": False, "status": 404, "result": None,
+                                            "error": _NOT_FOUND_ERR, "retry_after": None, "elapsed_ms": 3}]}),
+    # The same row, positional.
+    (200, {"columns": _ROW_COLS, "rows": [["revoke", False, 404, None, _NOT_FOUND_ERR, None, 3]]}),
+    # The plane's own flat envelope on an HTTP 404.
+    (404, {"ok": False, "status": 404, "result": None, "error": _NOT_FOUND_ERR}),
+], ids=["front-door-object-row", "front-door-positional-row", "flat-404"])
+def test_revoke_not_found_error_raises_not_found(monkeypatch, http_status, body):
+    _post(monkeypatch, http_status, json.dumps(body))
+    with pytest.raises(whisper_id.NotFoundError) as info:
+        revoke("ag_gone")
+    err = info.value
+    assert isinstance(err, WhisperError)  # existing `except WhisperError` still catches it
+    assert (err.code, err.status, err.retryable) == ("NOT_FOUND", 404, False)
+    assert str(err) == _NOT_FOUND_ERR["message"]  # the server's message, not "status 404"
+
+
+@pytest.mark.parametrize("rec", [
+    {"agent": "ag_gone", "status": "not_found"},
+    {"item": {"agent": "ag_gone", "status": "NOT_FOUND"}},
+], ids=["status", "under-item"])
+def test_revoke_old_ok_row_not_found_raises(monkeypatch, rec):
+    cols = list(rec)
+    _post(monkeypatch, 200, json.dumps({"ok": True, "status": 200,
+                                        "result": {"columns": cols, "rows": [[rec[c] for c in cols]]}}))
+    with pytest.raises(whisper_id.NotFoundError, match="nothing was revoked.*ag_gone") as info:
+        revoke("ag_gone")
+    assert (info.value.code, info.value.status, info.value.retryable) == ("NOT_FOUND", 404, False)
+
+
+def test_bare_404_without_code_is_not_not_found(monkeypatch):
+    # A 404 with no NOT_FOUND code is a wrong URL or a proxy, not "nothing was revoked".
+    _post(monkeypatch, 404, json.dumps({"title": "Not Found", "detail": "no such route", "status": 404}))
+    with pytest.raises(WhisperError, match="no such route") as info:
+        revoke("ag_gone")
+    assert not isinstance(info.value, whisper_id.NotFoundError)
+
+
+def test_not_found_code_on_other_status_is_not_not_found(monkeypatch):
+    _post(monkeypatch, 403, json.dumps({"ok": False, "status": 403,
+                                        "error": {"code": "NOT_FOUND", "message": "odd", "retryable": False}}))
+    with pytest.raises(WhisperError) as info:
+        revoke("ag_gone")
+    assert not isinstance(info.value, whisper_id.NotFoundError)
+    assert info.value.status == 403
+
+
+def test_control_error_carries_server_code_and_message(monkeypatch):
+    _post(monkeypatch, 200, json.dumps({"columns": _ROW_COLS, "rows": [
+        {"op": "policy", "ok": False, "status": 403, "result": None,
+         "error": {"code": "FORBIDDEN", "message": "this key lacks dns:policy:write", "retryable": False}}]}))
+    with pytest.raises(WhisperError, match="lacks dns:policy:write") as info:
+        policy(default="deny")
+    assert (info.value.code, info.value.status, info.value.retryable) == ("FORBIDDEN", 403, False)
+
+
+def test_revoke_real_revoke_still_returns_record(monkeypatch):
+    _post(monkeypatch, 200, json.dumps({"columns": _ROW_COLS, "rows": [
+        {"op": "revoke", "ok": True, "status": 200,
+         "result": {"columns": ["agent", "status"], "rows": [["ag_1", "revoked"]]}, "error": None}]}))
+    assert revoke("ag_1") == {"agent": "ag_1", "status": "revoked"}
 
 
 def test_revoke_requires_agent():
@@ -659,9 +730,10 @@ def test_graph_flow_non_json_event_tolerated(monkeypatch):
 
 def test_graph_flow_without_key_is_decided_upstream(monkeypatch):
     # A flow with no key is still SENT; the flow runner answers or refuses (401). The old
-    # client-side "no API key" raise is gone: the SDK does not adjudicate access.
+    # client-side "no API key" raise is gone: the SDK does not adjudicate access. The
+    # runner's own message ("Sign in to run workflows ... API key") now comes through.
     monkeypatch.delenv("WHISPER_API_KEY", raising=False)
-    with pytest.raises(WhisperError, match="401|status"):
+    with pytest.raises(WhisperError, match="401|status|API key"):
         Graph().typosquat()
 
 

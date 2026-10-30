@@ -48,6 +48,7 @@ __all__ = [
     "Agent",
     "Egress",
     "WhisperError",
+    "NotFoundError",
     "cli_path",
     # The security graph (Cypher): every verb is proxied up, with a key or without.
     "Graph",
@@ -77,7 +78,37 @@ def _control_url() -> str:
 
 
 class WhisperError(RuntimeError):
-    """A ``whisper`` CLI invocation failed, or the CLI is not installed."""
+    """A ``whisper`` CLI invocation failed, the CLI is not installed, or the control plane
+    refused a call. A control-plane refusal carries the server's own ``code`` (for example
+    ``NOT_FOUND`` or ``FORBIDDEN``), its ``status`` and whether it is ``retryable``; each is
+    ``None`` when the server did not say.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: Optional[str] = None,
+        status: Optional[int] = None,
+        retryable: Optional[bool] = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status = status
+        self.retryable = retryable
+
+
+class NotFoundError(WhisperError):
+    """The control plane understood the call and found nothing of yours to act on.
+
+    For :func:`revoke` it means nothing was revoked: the agent was revoked already, or it
+    is not in your account. That is an answer, not a fault, so it is never worth retrying
+    (``retryable`` is ``False``). ``code`` is ``"NOT_FOUND"`` and ``status`` is ``404``, and
+    the message is the server's own.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="NOT_FOUND", status=404, retryable=False)
 
 
 @dataclass(frozen=True)
@@ -442,13 +473,40 @@ def _records(result: Optional[dict]) -> list:
 
 
 def _problem_detail(error: Optional[dict], status: int) -> str:
-    """The single most-helpful line from a problem object: detail → title → type → status."""
+    """The single most-helpful line from a problem object: detail → message → title → type →
+    status. The control plane's own errors are ``{code, message, retryable}``; RFC 7807 ones
+    use ``detail``/``title``."""
     if isinstance(error, dict):
-        for key in ("detail", "title", "type"):
+        for key in ("detail", "message", "title", "type"):
             val = error.get(key)
             if val:
                 return str(val)
     return f"control plane returned status {status}" if status else "control plane reported failure"
+
+
+def _is_not_found(error: Optional[dict], status: int) -> bool:
+    """True when the plane says NOT_FOUND: the code, on a 404 or with no error status.
+
+    Read off the code, never off a bare 404: a 404 with no code is a mistyped control URL or
+    a proxy in the way, a failure to reach the plane rather than a statement about the agent.
+    """
+    if not isinstance(error, dict):
+        return False
+    if str(error.get("code") or "").strip().upper() != "NOT_FOUND":
+        return False
+    return status == 404 or status < 400
+
+
+def _control_error(error: Optional[dict], status: int) -> WhisperError:
+    """The exception for an ``ok:false`` reply, carrying the server's code and message."""
+    message = _problem_detail(error, status)
+    if _is_not_found(error, status):
+        return NotFoundError(message)
+    code = retryable = None
+    if isinstance(error, dict):
+        code = str(error["code"]) if error.get("code") else None
+        retryable = error["retryable"] if isinstance(error.get("retryable"), bool) else None
+    return WhisperError(message, code=code, status=status or None, retryable=retryable)
 
 
 def _api_key(key: Optional[str]) -> str:
@@ -473,12 +531,13 @@ def _api_key_optional(key: Optional[str]) -> str:
 
 def _control(op: str, args: Optional[dict] = None, *, key: Optional[str], timeout: int) -> list:
     """POST ``CALL whisper.agents({op, args})`` and return the result as a list of records,
-    or raise :class:`WhisperError` carrying the server's ``detail`` on ``ok:false``."""
+    or raise :class:`WhisperError` carrying the server's message and code on ``ok:false``
+    (:class:`NotFoundError` when the code is ``NOT_FOUND``)."""
     payload = json.dumps({"query": _build_agents_query(op, args)}).encode("utf-8")
     status, body = _http_post(_control_url(), payload, api_key=_api_key(key), timeout=timeout)
     ok, resolved_status, result, error = _decode_envelope(body, status)
     if not ok:
-        raise WhisperError(_problem_detail(error, resolved_status))
+        raise _control_error(error, resolved_status)
     return _records(result)
 
 
@@ -552,12 +611,40 @@ def logs(
 def revoke(agent: str, *, key: Optional[str] = None, timeout: int = 60) -> dict:
     """Fully revoke an agent (``op:revoke``): **IRREVERSIBLE**. **Pure-HTTP, key required.**
 
-    ``agent`` is the agent id or its ``/128`` address. Returns the status record.
+    ``agent`` is the agent id, its ``/128`` address or its label. Returns the status record.
+
+    Raises :class:`NotFoundError` when nothing was revoked: no agent of yours matches,
+    because it was revoked already or is not in your account. Do not retry that; call
+    :func:`list_agents` to see what is left. Both ways the plane says it raise it: the
+    ``NOT_FOUND`` error of current servers, and the ``status: not_found`` row older ones
+    answered with ``ok: true``.
     """
     if not agent or not str(agent).strip():
         raise WhisperError("revoke() needs an agent id or /128 address")
-    recs = _control("revoke", {"agent": str(agent).strip()}, key=key, timeout=timeout)
-    return recs[0] if recs else {}
+    selector = str(agent).strip()
+    recs = _control("revoke", {"agent": selector}, key=key, timeout=timeout)
+    rec = recs[0] if recs else {}
+    if _revoke_row_not_found(rec):
+        row = rec.get("item") if isinstance(rec.get("item"), dict) else rec
+        message = next((row[k] for k in ("message", "detail") if isinstance(row.get(k), str) and row[k].strip()), None)
+        raise NotFoundError(
+            message
+            or f"nothing was revoked: no agent of yours matches {selector!r}. If you revoked it "
+            "before, there is nothing left to revoke; list_agents() shows what is left"
+        )
+    return rec
+
+
+def _revoke_row_not_found(rec) -> bool:
+    """True for an older plane's ``ok: true`` revoke row whose status is ``not_found``
+    (directly or under ``item``). Only the first of ``status``/``state`` present is read."""
+    if not isinstance(rec, dict):
+        return False
+    row = rec.get("item") if isinstance(rec.get("item"), dict) else rec
+    for k in ("status", "state"):
+        if isinstance(row.get(k), str):
+            return row[k].strip().lower() == "not_found"
+    return False
 
 
 def identity(
