@@ -55,7 +55,7 @@ __all__ = [
     "graph",
     "__version__",
 ]
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 # The publicly-announced Whisper agent prefix (AS219419), used to liberally recover a
 # /128 from any control-plane envelope shape (Postel: be liberal in what we accept).
