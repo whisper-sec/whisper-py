@@ -1,6 +1,6 @@
 # whisper-id
 
-Three things for any Python agent, in one dependency-free package: query the **Whisper security graph** (7.48B nodes and 39.5B edges joining the physical, network, naming, ownership and threat layers; live totals at nic.whisper.online/stats, Cypher), give the agent a routable **IPv6 identity** with safe **egress**, and drive the full **control plane**.
+Three things for any Python agent, in one dependency-free package: query the **Whisper security graph** (billions of nodes and tens of billions of edges joining the physical, network, naming, ownership and threat layers, queried with Cypher; live totals at nic.whisper.online/stats), give the agent a routable **IPv6 identity** with safe **egress**, and drive the full **control plane**.
 
 ```sh
 pip install whisper-id            # add [socks] for requests+SOCKS: pip install "whisper-id[socks]"

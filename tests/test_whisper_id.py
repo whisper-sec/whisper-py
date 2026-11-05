@@ -808,19 +808,21 @@ def test_graph_every_method_links_its_docs(name):
 # --------------------------------------------------------------------------
 # The graph size this README states.
 #
-# The opening line is the first claim a reader meets on the package page, and
-# it once carried a figure roughly half the real one. Read the live totals from
-# https://nic.whisper.online/stats/data.json, which is keyless and public, and
-# round from those.
+# The opening line is the first claim a reader meets on the package page. It
+# has been wrong twice: first with the db.schema() pair, roughly half the real
+# size, then with a rounded live figure that the graph later moved away from in
+# both directions (more edges, fewer nodes). The package page is a publish-time
+# snapshot, so any hard-coded count goes stale between releases.
 #
-# The guard is a FLOOR rather than an exact match, and it is deliberately
-# offline: it cannot fail because a network is down, and it cannot go stale as
-# the graph grows. It fails only if the stated size drops far below what the
-# graph has already reached.
+# So the README states the scale in words that hold for any vintage and points
+# at the live totals (https://nic.whisper.online/stats/data.json). This guard is
+# offline and refuses a hard-coded count in any unit or wording.
 # --------------------------------------------------------------------------
 
-_MIN_NODES_B = 7.0
-_MIN_EDGES_B = 39.0
+_HARD_CODED_COUNT = (
+    r"\d[\d.,]*\s*(?:[KMBT]|thousand|million|billion|trillion)?\s+"
+    r"(?:nodes|edges|relationships|objects)\b"
+)
 
 
 def _readme() -> str:
@@ -829,26 +831,32 @@ def _readme() -> str:
         return fh.read()
 
 
-def test_readme_states_the_graph_size_it_actually_has():
+def test_readme_states_no_graph_count_that_can_go_stale():
     import re
 
     body = _readme()
     # The control: the file really was read, so an empty read cannot pass.
     assert "Whisper security graph" in body
 
-    nodes = re.search(r"([\d.]+)B nodes", body)
-    # Liberal in the word: "edges" and "relationships" are the same quantity, and a
-    # guard that only knew one of them would read the other as "no figure at all".
-    edges = re.search(r"([\d.]+)B (?:edges|relationships)", body)
-    assert nodes, "the README no longer states a node count"
-    assert edges, "the README no longer states an edge count"
-    assert float(nodes.group(1)) >= _MIN_NODES_B, (
-        f"README states {nodes.group(1)}B nodes; the graph passed "
-        f"{_MIN_NODES_B}B. Read the live figure from "
-        "https://nic.whisper.online/stats/data.json."
+    stale = re.search(_HARD_CODED_COUNT, body, re.IGNORECASE)
+    assert not stale, (
+        f"README hard-codes a graph count ({stale.group(0)!r}); the package page "
+        "freezes it at publish time and the graph moves. State the scale in words "
+        "and point at https://nic.whisper.online/stats."
     )
-    assert float(edges.group(1)) >= _MIN_EDGES_B, (
-        f"README states {edges.group(1)}B edges; the graph passed "
-        f"{_MIN_EDGES_B}B. Read the live figure from "
-        "https://nic.whisper.online/stats/data.json."
+    assert "nic.whisper.online/stats" in body, "README no longer points at the live totals"
+
+
+def test_the_stale_count_guard_catches_the_figures_it_exists_for():
+    import re
+
+    # The guard proves itself against the two figures that actually shipped,
+    # and against the wording that replaced them.
+    for shipped in ("3.6B nodes / 30B relationships", "7.48B nodes and 39.5B edges",
+                    "6,946,988,194 nodes", "47 billion objects"):
+        assert re.search(_HARD_CODED_COUNT, shipped, re.IGNORECASE), shipped
+    assert not re.search(
+        _HARD_CODED_COUNT,
+        "billions of nodes and tens of billions of edges",
+        re.IGNORECASE,
     )
